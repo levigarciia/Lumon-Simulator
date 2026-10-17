@@ -1,0 +1,20 @@
+<!doctype html>
+<html
+    lang="pt-BR"
+    class="[font-family:'Segoe_UI',system-ui,sans-serif] text-[14px] text-principal bg-fundo [color-scheme:dark]"
+>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta
+            http-equiv="Content-Security-Policy"
+            content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;
+            connect-src 'self' data: blob: ws://127.0.0.1:5174; object-src 'none'; base-uri 'self'"
+        />
+        <title>Lumon</title>
+    </head>
+    <body class="m-0 h-screen overflow-hidden">
+        <div id="root" class="h-full"></div>
+        <script type="module" src="/src/principal.tsx"></script>
+    </body>
+</html>

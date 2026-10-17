@@ -1,0 +1,14 @@
+@import 'tailwindcss';
+
+@theme {
+    --color-fundo: #101c20;
+    --color-superficie: #192b30;
+    --color-borda: #345056;
+    --color-principal: #e2ece6;
+    --color-secundario: #b1c8c2;
+    --color-discreto: #8ca7a2;
+}
+
+button { cursor: pointer; }
+button:disabled { cursor: default; }
+button:focus-visible { outline: 3px solid #75967a; outline-offset: 3px; }

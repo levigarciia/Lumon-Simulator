@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-electron/
+release/
+artifacts/
+
+.env
+.env.*
+
+*.log
+.vite/
+*.tsbuildinfo
+
+Thumbs.db
+Desktop.ini

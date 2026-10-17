@@ -1,0 +1,42 @@
+.terminal-macrodados {
+    color: #a5d8dc;
+    background: #0c1b23;
+    border: 1px solid #466870;
+    border-radius: 4px;
+    font-family: Consolas, monospace;
+    box-shadow: inset 0 0 32px #00000060;
+}
+
+.terminal-celula {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 20px;
+    font-size: 14px;
+    border: 1px solid transparent;
+    transition: color 250ms, background-color 250ms, transform 250ms;
+}
+
+.terminal-selecao {
+    border-color: #a5d8dc;
+    background: #a5d8dc20;
+    animation: selecao-macrodados 700ms ease-out;
+}
+
+.terminal-refinada {
+    color: #6b9297;
+}
+
+.terminal-progresso {
+    accent-color: #a5d8dc;
+}
+
+@keyframes selecao-macrodados {
+    from { transform: scale(1.2); background-color: #a5d8dc60; }
+    to { transform: scale(1); background-color: #a5d8dc20; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .terminal-celula { transition: none; }
+    .terminal-selecao { animation: none; }
+}

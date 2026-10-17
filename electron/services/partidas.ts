@@ -67,7 +67,20 @@ export class Partidas {
 
     /** Apaga o registro do escritório ativo e confirma sua remoção das revisões anteriores. */
     async excluirRegistroHistorico(id: string): Promise<Resultado> {
-        const resultado = this.obter().excluirRegistroHistorico(id);
+        return this.confirmarExclusao(this.obter().excluirRegistroHistorico(id));
+    }
+
+    /** Apaga todo o arquivo do escritório ativo e confirma sua remoção das revisões anteriores. */
+    async excluirHistoricoCompleto(): Promise<Resultado> {
+        return this.confirmarExclusao(this.obter().excluirHistoricoCompleto());
+    }
+
+    /** Apaga do Work um arquivo, ou todos, e confirma sua remoção das revisões anteriores. */
+    async excluirArquivoWork(arquivoId?: string): Promise<Resultado> {
+        return this.confirmarExclusao(this.obter().excluirArquivoWork(arquivoId));
+    }
+
+    private async confirmarExclusao(resultado: Resultado): Promise<Resultado> {
         if (!resultado.ok) return resultado;
         await this.persistencia.esquecerRevisoes();
         return resultado;

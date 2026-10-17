@@ -70,6 +70,34 @@ test('histórico do Work é consultável em todos os canais sem expor gabarito o
     } finally { escritorio.encerrar(); }
 });
 
+test('reabertura encerra ferramentas pendentes das conversas individuais', () => {
+    const { escritorio, lider } = preparar();
+    const ferramenta = { id: 'pausa-pendente', resumo: 'Escritório: fazer_pausa', estado: 'rodando' as const };
+    const mensagem = {
+        id: 'resposta-pendente', autor: 'funcionario' as const, texto: '', criadaEm: new Date().toISOString(),
+        ferramentas: [ferramenta],
+        partes: [{ id: ferramenta.id, tipo: 'ferramenta' as const, ferramenta, criadaEm: new Date().toISOString() }],
+    };
+    const gravados: ReturnType<typeof estadoInicial>[] = [];
+    let reaberto: Escritorio | undefined;
+    try {
+        escritorio['estado'].conversas[lider.id] = [mensagem];
+        reaberto = new Escritorio(structuredClone(escritorio['estado']), (estado) => gravados.push(estado),
+            () => {}, '.');
+        const recuperada = reaberto['estado'].conversas[lider.id]![0]!;
+        expect(recuperada).toMatchObject({ erro: 'Tarefa interrompida.',
+            ferramentas: [{ id: ferramenta.id, estado: 'recusada',
+                saida: 'O aplicativo foi encerrado durante esta ação.' }],
+            partes: [{ tipo: 'ferramenta', ferramenta: { estado: 'recusada',
+                saida: 'O aplicativo foi encerrado durante esta ação.' } }],
+        });
+        expect(gravados.at(-1)?.conversas[lider.id]?.[0]?.ferramentas[0]?.estado).toBe('recusada');
+    } finally {
+        reaberto?.encerrar();
+        escritorio.encerrar();
+    }
+});
+
 function preparar(pasta = '.') {
     const estado = estadoInicial();
     estado.projetos = [{ id: projetoId, nome: 'Projeto', pasta: '.' }];
@@ -259,6 +287,53 @@ test('macrodados preserva gabarito interno, delegação e recompensa única apó
         expect(decisao).toMatchObject({ autorId: 'diretoria', autorNome: 'Diretoria' });
         expect(notificacoes.find((texto) => texto.includes(decisao.id))).toContain('Diretoria: Entrega aprovada:');
         expect(escritorio['social'].contexto(lider.id, 'trabalho', false)).toContain('autor Diretoria');
+    } finally { escritorio.encerrar(); }
+});
+
+test('envio rejeitado repetido não consome o limite da etapa de Macrodados', () => {
+    const { escritorio, lider, colega } = preparar();
+    const arquivo = gerarArquivo(42, new Date('2030-01-01'));
+    escritorio['estado'].refinamentos = { [arquivo.id]: arquivo };
+    escritorio['estado'].trabalhos = [{
+        id: 'etapa', pedidoId: 'pedido', funcionarioId: colega.id, nome: colega.nome,
+        projetoId, tarefa: 'Refine um grupo', resultado: '', estado: 'trabalhando',
+        criadoEm: new Date().toISOString(), arquivoId: arquivo.id,
+        solicitante: { id: lider.id, nome: lider.nome },
+    }];
+    const celulasInvalidas = ['A1', 'B1', 'C1'];
+    try {
+        expect(escritorio['refinarArquivo'](colega.id, celulasInvalidas, 'pavor')).toContain('mesma linha');
+        expect(escritorio['refinarArquivo'](colega.id, ['D10', 'E1', 'E2'], 'alegria')).toContain('mesma linha');
+        expect(escritorio.publico().refinamentos[arquivo.id]!.envios).toHaveLength(0);
+        expect(escritorio['estadoEtapa'](colega.id)).toEqual({ codigo: 'etapa_ativa', terminal: false });
+    } finally { escritorio.encerrar(); }
+});
+
+test('insistir em seleções inválidas encerra a etapa delegada', () => {
+    const { escritorio, lider, colega } = preparar();
+    const arquivo = gerarArquivo(42, new Date('2030-01-01'));
+    escritorio['estado'].refinamentos = { [arquivo.id]: arquivo };
+    escritorio['estado'].trabalhos = [{
+        id: 'etapa', pedidoId: 'pedido', funcionarioId: colega.id, nome: colega.nome,
+        projetoId, tarefa: 'Refine um grupo', resultado: '', estado: 'trabalhando',
+        criadoEm: new Date().toISOString(), arquivoId: arquivo.id,
+        solicitante: { id: lider.id, nome: lider.nome },
+    }];
+    try {
+        for (let tentativa = 0; tentativa < 2; tentativa++) {
+            escritorio['refinarArquivo'](colega.id, ['D10', 'E1', 'E2'], 'alegria');
+        }
+        expect(escritorio['estadoEtapa'](colega.id).terminal).toBe(false);
+        expect(escritorio['refinarArquivo'](colega.id, ['D10', 'E1', 'E2'], 'alegria')).toContain('encerrada');
+        expect(escritorio['estadoEtapa'](colega.id)).toEqual({ codigo: 'tentativas_esgotadas', terminal: true });
+        expect(escritorio['refinarArquivo'](colega.id, arquivo.grupos[0]!.celulas, 'alegria')).toContain('encerrada');
+    } finally { escritorio.encerrar(); }
+});
+
+test('líder sem delegação em andamento recebe aviso ao cancelar', () => {
+    const { escritorio, lider } = preparar();
+    try {
+        expect(escritorio['orquestracao'].cancelarDelegacao(lider.id)).toContain('pedido ativo');
     } finally { escritorio.encerrar(); }
 });
 

@@ -32,6 +32,9 @@ export type ApiLumon = {
     obterGeral: () => Promise<MensagemGeral[]>;
     obterHistorico: () => Promise<RegistroHistorico[]>;
     excluirRegistroHistorico: (registroId: string) => Promise<Resultado>;
+    excluirHistoricoCompleto: () => Promise<Resultado>;
+    /** Apaga do Work o arquivo de Macrodados indicado, ou todos quando omitido. */
+    excluirArquivoWork: (arquivoId?: string) => Promise<Resultado>;
     limparGeral: () => Promise<Resultado>;
     limparConversa: (funcionarioId: string, threadId?: string) => Promise<Resultado>;
     criarThread: (thread: Thread) => Promise<Resultado>;
@@ -78,6 +81,8 @@ export const canaisLumon = [
     'obterGeral',
     'obterHistorico',
     'excluirRegistroHistorico',
+    'excluirHistoricoCompleto',
+    'excluirArquivoWork',
     'limparGeral',
     'limparConversa',
     'criarThread',

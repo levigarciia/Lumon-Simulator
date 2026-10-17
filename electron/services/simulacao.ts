@@ -15,7 +15,7 @@ import {
 } from '../../shared/escritorio';
 import { escolherLugarEncontro } from '../../shared/encontros';
 import { encontrarRota } from '../../shared/caminhos';
-import type { QuadroSimulacao } from '../../shared/estado';
+import type { PausaSalva, QuadroSimulacao } from '../../shared/estado';
 import type { Funcionario, StatusFuncionario } from '../../shared/funcionarios';
 import {
     aplicarAcontecimento,
@@ -51,6 +51,8 @@ export type RegistroSimulacao = {
     relogioInicial: number;
     necessidadesIniciais: Record<string, Necessidades>;
     gravar: (relogio: number, necessidades: Record<string, Necessidades>, dia?: string) => void;
+    pausasIniciais?: Record<string, PausaSalva>;
+    gravarPausas?: (pausas: Record<string, PausaSalva>) => void;
     diaInicial?: string;
     agora?: () => Date;
     agoraPausaMs?: () => number;
@@ -63,6 +65,7 @@ export type RegistroSimulacao = {
     aoOcioso?: (id: string) => void;
     aoCompartilharPausa?: (id: string, colegaId: string, itemId: string) => void;
     aoEncerrarCompanhia?: (id: string, colegaId: string) => void;
+    aoInterromperEncontro?: (id: string, colegaId: string, preservarTurno: boolean) => void;
     ausenciasIniciais?: Record<string, Ausencia>;
     gravarAusencias?: (ausencias: Record<string, Ausencia>) => void;
     aoRetornar?: (id: string, ausencia: Ausencia) => void;
@@ -81,7 +84,7 @@ export type RegistroPausa = {
 type Pausa = {
     id: string; iniciadaEm: string;
     itemId: string; indiceUso: number; companhiaAvisada?: string;
-    atividade: Atividade; origem: RegistroPausa['origem']; segundos: number;
+    atividade: PausaSalva['atividade']; origem: RegistroPausa['origem']; segundos: number;
     terminaEm: number | null; atualizadoEm: number | null; limite: number; concluir: (texto: string) => void;
 };
 type Encontro = {
@@ -90,6 +93,9 @@ type Encontro = {
 
 const atividadesDePausa = new Set<Atividade>(['cafe', 'comendo', 'descansando', 'ouvindo_musica']);
 
+function ehAtividadeDePausa(atividade: Atividade): atividade is PausaSalva['atividade'] {
+    return atividadesDePausa.has(atividade);
+}
 
 function itensDaAtividade(sala: Sala, atividade: Atividade): ItemPosicionado[] {
     return sala.itens.filter((item) => !item.quebrado && catalogo[item.tipo].uso?.atividade === atividade);
@@ -125,6 +131,7 @@ export class SimulacaoEscritorio {
             this.agentesPorId.set(funcionario.id, agente);
         }
         this.restaurarAusencias();
+        this.restaurarPausas();
         if (registro.automatica !== false) {
             this.temporizador = setInterval(() => this.avancar(intervaloPassoMs / 1000), intervaloPassoMs);
         }
@@ -186,6 +193,7 @@ export class SimulacaoEscritorio {
         if (pausa) {
             this.registrarPausa(id, 'interrupcao');
             this.pausas.delete(id);
+            this.gravarPausas();
             pausa.concluir('Sua pausa foi interrompida porque você saiu da sala.');
         }
         this.ausencias.set(id, { ...ausencia, lugar: this.lugaresLivres(ausencia.motivo)[0],
@@ -256,6 +264,36 @@ export class SimulacaoEscritorio {
             }
         }
         this.registro.gravarAusencias?.(this.todasAusencias());
+    }
+
+    private restaurarPausas(): void {
+        for (const [id, salva] of Object.entries(this.registro.pausasIniciais ?? {})) {
+            if (!this.agentesPorId.has(id) || this.ausencias.has(id)) continue;
+            const item = this.salaConhecida.itens.find((movel) => movel.id === salva.itemId
+                && !movel.quebrado && catalogo[movel.tipo].uso?.atividade === salva.atividade);
+            if (!item) continue;
+            const vagas = this.vagasLivres(item, id);
+            const indiceUso = vagas.includes(salva.indiceUso) ? salva.indiceUso : vagas[0];
+            if (indiceUso === undefined) continue;
+            this.pausas.set(id, { ...salva, indiceUso, concluir: () => {} });
+            const local = celulaDeUso(item, indiceUso)!;
+            this.agentesPorId.set(id, { ...this.agentesPorId.get(id)!, posicao: centroCelula(local),
+                direcao: item.rotacao * Math.PI / 2, rota: [], destinoId: item.id,
+                atividade: salva.atividade, indiceUso });
+        }
+        this.gravarPausas();
+    }
+
+    private pausasAtivas(): Record<string, PausaSalva> {
+        return Object.fromEntries([...this.pausas].map(([id, pausa]) => [id, {
+            id: pausa.id, iniciadaEm: pausa.iniciadaEm, itemId: pausa.itemId, indiceUso: pausa.indiceUso,
+            atividade: pausa.atividade, origem: pausa.origem, segundos: pausa.segundos,
+            terminaEm: pausa.terminaEm, atualizadoEm: pausa.atualizadoEm, limite: pausa.limite,
+        }]));
+    }
+
+    private gravarPausas(): void {
+        this.registro.gravarPausas?.(this.pausasAtivas());
     }
 
     /** Aplica impacto direto no esgotamento, como cobrança, rejeição ou sessão de bem estar. */
@@ -333,9 +371,11 @@ export class SimulacaoEscritorio {
     /** Cancela o uso de um item indisponível e libera seus ocupantes e diálogos imediatamente. */
     interromperPausasDoItem(itemId: string, motivo: string): void {
         if (!motivo.trim()) throw new Error('A interrupção exige um motivo.');
+        let alteradas = false;
         for (const [id, pausa] of [...this.pausas]) {
             if (pausa.itemId !== itemId) continue;
             this.pausas.delete(id);
+            alteradas = true;
             this.registrarPausa(id, 'interrupcao', pausa, motivo);
             this.proximoAviso.set(id, this.segundos + 120);
             const agente = this.agentesPorId.get(id);
@@ -343,6 +383,7 @@ export class SimulacaoEscritorio {
             pausa.concluir(`Pausa interrompida: ${motivo} Você deixou de usar o item. `
                 + 'A recuperação foi encerrada. Não anuncie sua volta automaticamente no Geral.');
         }
+        if (alteradas) this.gravarPausas();
         this.registro.emitirQuadro({ segundos: this.segundos, agentes: this.agentes() });
         this.registro.emitirEstado();
     }
@@ -433,12 +474,16 @@ export class SimulacaoEscritorio {
      * Leva o funcionário ao item mais próximo do tipo pedido e só responde quando ele volta, para que o turno do
      * harness fique parado durante a pausa. Devolve um texto para o agente ler.
      */
-    pedirPausa(funcionarioId: string, atividade: Atividade, minutos: number): Promise<string> {
-        if (!atividadesDePausa.has(atividade)) return Promise.resolve('Escolha uma atividade de pausa válida.');
+    pedirPausa(
+        funcionarioId: string, atividade: Atividade, minutos: number, preservarTurnoReservado = false,
+    ): Promise<string> {
+        if (!ehAtividadeDePausa(atividade)) return Promise.resolve('Escolha uma atividade de pausa válida.');
         this.sincronizar();
         const agente = this.agentesPorId.get(funcionarioId);
         if (!agente) return Promise.resolve('Você não está na sala.');
-        if (this.emPausa(funcionarioId)) return Promise.resolve('Você já está em pausa ou em um encontro.');
+        if (this.pausas.has(funcionarioId) || this.ausencias.has(funcionarioId)) {
+            return Promise.resolve('Você já está em pausa ou em um encontro.');
+        }
         const item = this.itemMaisProximo(agente, atividade);
         if (!item) {
             const quebrados = this.salaConhecida.itens.filter((existente) =>
@@ -450,12 +495,17 @@ export class SimulacaoEscritorio {
             }
             return Promise.resolve('Não há nenhum item para isso no escritório. Peça à Diretoria que compre um.');
         }
+        if (!Number.isInteger(minutos) || minutos < 1 || minutos > minutosMaximosPausa) {
+            return Promise.resolve('Escolha uma pausa entre 1 e 15 minutos reais.');
+        }
         const indiceUso = this.vagasLivres(item, funcionarioId)[0];
         if (indiceUso === undefined) {
             return Promise.resolve('Os itens dessa atividade estão ocupados. Aguarde um ficar livre para acompanhar.');
         }
-        if (!Number.isInteger(minutos) || minutos < 1 || minutos > minutosMaximosPausa) {
-            return Promise.resolve('Escolha uma pausa entre 1 e 15 minutos reais.');
+        const parceiroEncontro = this.parceiroEncontro(funcionarioId);
+        if (parceiroEncontro) {
+            this.registro.aoInterromperEncontro?.(funcionarioId, parceiroEncontro, preservarTurnoReservado);
+            this.cancelarEncontro(funcionarioId);
         }
         const duracao = minutos * 60;
         return new Promise((concluir) => {
@@ -470,6 +520,7 @@ export class SimulacaoEscritorio {
                 limite: this.segundos + folgaCaminhoSegundos,
                 concluir,
             });
+            this.gravarPausas();
             this.registrarPausa(funcionarioId, 'inicio');
             this.registro.emitirEstado();
         });
@@ -480,12 +531,8 @@ export class SimulacaoEscritorio {
         for (const espera of this.chegadasAnexos.values()) espera.concluir(false);
         this.chegadasAnexos.clear();
         for (const id of this.encontros.keys()) this.cancelarEncontro(id);
-        for (const [id, pausa] of this.pausas) {
-            this.registrarPausa(id, 'interrupcao');
-            pausa.concluir('O escritório fechou durante a sua pausa.');
-            this.pausas.delete(id);
-        }
         this.registro.gravar(this.segundos, this.necessidades);
+        this.gravarPausas();
     }
 
     private contexto(): ContextoSimulacao {
@@ -527,6 +574,7 @@ export class SimulacaoEscritorio {
                 this.agentesPorId.set(funcionario.id, reajustarAgente({ ...agente, mesaId: funcionario.mesaId }, contexto));
             }
         }
+        let pausasAlteradas = false;
         for (const id of this.agentesPorId.keys()) {
             if (presentes.has(id)) continue;
             this.agentesPorId.delete(id);
@@ -534,9 +582,10 @@ export class SimulacaoEscritorio {
             if (this.ausencias.delete(id)) this.registro.gravarAusencias?.(this.todasAusencias());
             this.registrarPausa(id, 'interrupcao');
             this.pausas.get(id)?.concluir('Você foi demitido.');
-            this.pausas.delete(id);
+            pausasAlteradas ||= this.pausas.delete(id);
             this.cancelarEncontro(id);
         }
+        if (pausasAlteradas) this.gravarPausas();
     }
 
     private ordemDe(funcionarioId: string): Ordem {
@@ -584,6 +633,7 @@ export class SimulacaoEscritorio {
         const terminou = pausa.terminaEm !== null && this.agoraDaPausa() >= pausa.terminaEm;
         if (!terminou && (pausa.terminaEm !== null || this.segundos < pausa.limite)) return;
         this.pausas.delete(id);
+        this.gravarPausas();
         this.registrarPausa(id, terminou ? 'conclusao' : 'interrupcao', pausa);
         this.proximoAviso.set(id, this.segundos + 120);
         const texto = terminou
@@ -629,6 +679,7 @@ export class SimulacaoEscritorio {
         }
         if (this.passos % passosPorGravacao === 0) {
             this.registro.gravar(this.segundos, this.necessidades);
+            this.gravarPausas();
             this.registro.emitirEstado();
         }
     }
@@ -669,6 +720,7 @@ export class SimulacaoEscritorio {
         if (pausa.terminaEm === null) {
             pausa.terminaEm = agora + pausa.segundos * 1000;
             pausa.atualizadoEm = agora;
+            this.gravarPausas();
         }
         const ate = Math.min(agora, pausa.terminaEm);
         const decorrido = Math.max(0, (ate - pausa.atualizadoEm!) / 1000);

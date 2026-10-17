@@ -40,6 +40,7 @@ export type AcoesEscritorio = {
     atualizarPensamento: (funcionarioId: string, pensamento: string) => string;
     silenciar?: (funcionarioId: string) => string;
     delegar: (liderId: string, destino: string, tarefa: string) => Promise<string>;
+    cancelarDelegacao?: (liderId: string) => string;
     interagir?: (
         id: string, destino: string, acao: AcaoSocial | 'reservado', mensagem: string,
         alcance: 'publico' | 'local' | 'reservado', fontes: string[], sobreId?: string, origem?: OrigemMcp,
@@ -315,6 +316,11 @@ function criarServidor({ funcionarioId, origem }: Credencial, acoes: AcoesEscrit
                 tarefa: z.string().trim().min(1).max(20000),
             },
         }, async ({ funcionario, tarefa }) => texto(await acoes.delegar(funcionarioId, funcionario, tarefa)));
+        if (acoes.cancelarDelegacao) servidor.registerTool('cancelar_delegacao', {
+            description: 'Para o líder: interrompe a etapa delegada que travou ou demora demais, para seguir com '
+                + 'outro colega ou refinar você mesmo.',
+            inputSchema: {},
+        }, async () => texto(acoes.cancelarDelegacao!(funcionarioId)));
     }
     if (origem !== 'chat' && cargo === 'lider' && acoes.falarComResponsavel) {
         servidor.registerTool('falar_com_responsavel', {

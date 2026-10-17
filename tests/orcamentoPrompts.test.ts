@@ -5,7 +5,7 @@ import type { Funcionario } from '../shared/funcionarios';
 import { instrucoesPausas } from '../shared/social';
 
 const orcamento = {
-    instrucoesGeral: 4750,
+    instrucoesGeral: 4850,
     promptGeral: 2600,
     instrucoesTrabalho: 3800,
     promptTrabalho: 1800,

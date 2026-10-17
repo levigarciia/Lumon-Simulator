@@ -41,9 +41,25 @@ type PedidoAtivo = {
     delegacoes: number;
     funcionarios: Set<string>;
     pendentes: Set<Promise<RespostaTrabalho>>;
+    interrompidos: Set<string>;
     origemCorrecaoId?: string;
     arquivoId?: string;
 };
+
+/** Limites de execução no Work; após o prazo e a tolerância, o agente é dado como interrompido. */
+export type PrazosOrquestracao = { liderMs: number; delegadoMs: number; toleranciaMs: number };
+
+const prazosPadrao: PrazosOrquestracao = { liderMs: 1200000, delegadoMs: 180000, toleranciaMs: 15000 };
+
+async function aguardarAte<T>(promessa: Promise<T>, ms: number): Promise<T | undefined> {
+    let temporizador: ReturnType<typeof setTimeout> | undefined;
+    const limite = new Promise<undefined>((resolver) => { temporizador = setTimeout(() => resolver(undefined), ms); });
+    try {
+        return await Promise.race([promessa, limite]);
+    } finally {
+        clearTimeout(temporizador);
+    }
+}
 
 const instrucoesLiderRefinamento = [
     'Pedido da aba Work: refinamento de macrodados. Você coordena o arquivo.',
@@ -51,8 +67,10 @@ const instrucoesLiderRefinamento = [
     'Não invente coordenadas nem uma caixa obrigatória antes de examinar os dados e os envios reais.',
     'Delegue o envio real de um grupo por refinar, sem impor uma região ou um temperamento não confirmado.',
     'Cada colega faz uma etapa curta: um grupo aceito ou no máximo quatro envios, e devolve o resultado.',
-    'Distribua a carga entre disponíveis. Considere o bem estar, a confiança e os envios anteriores; explique escolhas.',
-    'Evite sobrecarregar um colega. Se todos estiverem ocupados, refine você.',
+    'Depois de cada retorno, delegue ao próximo colega disponível que ainda não participou deste arquivo.',
+    'Não repita colegas enquanto houver alguém disponível que ainda não participou. Depois de todos participarem, '
+        + 'ou se todos os que ainda não participaram estiverem indisponíveis, refine você; não delegue de novo.',
+    'Considere o bem estar, a confiança e os envios anteriores ao escolher entre colegas ainda não participantes.',
     'Trabalhe até concluir o arquivo ou o prazo terminar. Depois resuma: só a Diretoria aprova.',
     'Priorize chamadas de ferramentas; não narre hipóteses a cada envio. Resuma a entrega em até três frases.',
 ];
@@ -63,15 +81,19 @@ const instrucoesDelegadoRefinamento = 'Use abrir_arquivo para ver a grade e refi
     + 'enquanto houver caixa não testada. Sua tarefa exige envios reais por refinar, não apenas listar coordenadas. '
     + 'Somente retornos das ferramentas comprovam tentativas, aceitações ou rejeições. '
     + 'Sua etapa termina ao aceitar um grupo, após quatro envios ou ao terminar o prazo, o que vier primeiro. '
-    + 'Priorize seleções já reconhecidas nos envios da equipe. Região ou caixa sugeridas não são resultados verificados. '
-    + 'Abandone uma região sem padrões reconhecidos. Não narre hipóteses a cada envio. '
+    + 'Leia a grade e os envios recentes antes de escolher; nunca use células marcadas * nem repita uma seleção já '
+    + 'rejeitada. Priorize seleções reconhecidas ainda não aceitas nos envios da equipe e teste só caixas não tentadas. '
+    + 'Região ou caixa sugeridas não são resultados verificados. Abandone uma região sem padrões reconhecidos. '
+    + 'Não narre hipóteses a cada envio. '
+    + 'Durante a etapa só as ferramentas do Work funcionam: não fale no Geral nem converse em particular. '
+    + 'Se a região pedida não tiver três dígitos iguais, escolha outra na grade em vez de reclamar ao líder. '
     + 'Ao terminar, devolva as células, resultados e pendências em até três frases. Outros colegas continuarão.';
 
 /** Encaminha pedidos do Work ao líder e devolve os resultados reais das delegações pelo MCP. */
 export class Orquestracao {
     private ativos = new Map<string, PedidoAtivo>();
 
-    constructor(private registro: RegistroOrquestracao) {}
+    constructor(private registro: RegistroOrquestracao, private prazos = prazosPadrao) {}
 
     enviar(
         projetoId: string, tarefa: string, threadId = threadPrincipal, origemCorrecaoId?: string, arquivoId?: string,
@@ -91,15 +113,15 @@ export class Orquestracao {
         }
         const pedido: PedidoAtivo = {
             id: randomUUID(), liderId: lider.id, threadId, projeto, cancelado: false, delegacoes: 0,
-            funcionarios: new Set(), pendentes: new Set(), origemCorrecaoId, arquivoId,
+            funcionarios: new Set(), pendentes: new Set(), interrompidos: new Set(), origemCorrecaoId, arquivoId,
         };
         const devolvida = origemCorrecaoId
             ? this.registro.trabalhos().find((item) => item.id === origemCorrecaoId) : undefined;
         this.ativos.set(chave, pedido);
         const instrucoes = arquivoId
-            ? [...instrucoesLiderRefinamento, this.equipeRefinamento(lider.id), `Pedido: ${tarefa}`].join('\n')
+            ? [...instrucoesLiderRefinamento, this.equipeRefinamento(lider.id, pedido.id), `Pedido: ${tarefa}`].join('\n')
             : this.instrucoesProjeto(projetoId, threadId, tarefa, devolvida);
-        void this.executar(pedido, lider, tarefa, instrucoes).finally(async () => {
+        void this.executar(pedido, lider, tarefa, instrucoes, this.prazos.liderMs).finally(async () => {
             await Promise.allSettled([...pedido.pendentes]);
             if (this.ativos.get(chave) === pedido) this.ativos.delete(chave);
         });
@@ -144,11 +166,14 @@ export class Orquestracao {
                 || (this.registro.adequacao?.(liderId, b.id) ?? 0) - (this.registro.adequacao?.(liderId, a.id) ?? 0));
         const participantes = new Set(this.registro.trabalhos().filter((item) => item.pedidoId === pedidoId)
             .map((item) => item.funcionarioId));
+        const disponiveisNovos = colegas.filter((pessoa) => !participantes.has(pessoa.id)
+            && !this.registro.impedimento?.(pessoa.id) && !this.ocupado(pessoa.id));
         return ['Equipe para delegação (use o ID em delegar):', ...colegas.map((pessoa) =>
             `${pessoa.nome}, ID ${pessoa.id}, ${nomeCargo(pessoa.cargo)}, `
                 + `${this.registro.impedimento?.(pessoa.id) ?? (this.ocupado(pessoa.id) ? 'ocupado' : 'disponível')}, `
                 + `${participantes.has(pessoa.id) ? 'já participou' : 'ainda não participou'}, ${carga(pessoa.id)} etapas.`),
-        ...(!colegas.length ? ['Nenhum colega elegível.'] : [])].join('\n');
+        ...(disponiveisNovos.length ? [`Próxima etapa: delegue a ${disponiveisNovos[0]!.nome}, ainda não participante.`]
+            : ['Todos já participaram: delegue novamente a um colega disponível ou refine você mesmo.'])].join('\n');
     }
 
     async delegar(liderId: string, destino: string, tarefa: string): Promise<string> {
@@ -168,17 +193,22 @@ export class Orquestracao {
         if (this.registro.afastado?.(funcionario.id, liderId)) {
             return 'A Diretoria aprovou a transferência desse funcionário para longe da sua liderança.';
         }
-        if (pedido.pendentes.size) return 'Aguarde a delegação anterior terminar antes de iniciar outra.';
+        if (pedido.pendentes.size) {
+            return 'A etapa delegada anterior continua em execução, mesmo que a chamada tenha falhado. '
+                + 'Use cancelar_delegacao para seguir com outro colega.';
+        }
         if (pedido.delegacoes >= 20) return 'Limite de 20 delegações neste pedido. Resuma o progresso à Diretoria.';
         if (this.ocupado(funcionario.id)) return `${funcionario.nome} está ocupado. Escolha outro colega ou aguarde.`;
         if (pedido.arquivoId) {
-            const carga = (id: string) => this.registro.trabalhos().filter((item) => item.pedidoId === pedido.id
-                && item.funcionarioId === id).length;
-            const alternativa = this.registro.funcionarios().find((pessoa) => pessoa.id !== liderId
-                && pessoa.id !== funcionario.id && refina(pessoa.cargo) && !this.ocupado(pessoa.id)
-                && !this.registro.impedimento?.(pessoa.id)
-                && !this.registro.afastado?.(pessoa.id, liderId) && carga(pessoa.id) + 1 < carga(funcionario.id));
-            if (alternativa) return `Distribua a carga: ${alternativa.nome} tem menos etapas e está disponível.`;
+            const participantes = new Set(this.registro.trabalhos()
+                .filter((item) => item.pedidoId === pedido.id).map((item) => item.funcionarioId));
+            const disponiveisNovos = this.registro.funcionarios().filter((pessoa) =>
+                pessoa.id !== liderId && !participantes.has(pessoa.id) && refina(pessoa.cargo)
+                && !this.ocupado(pessoa.id) && !this.registro.impedimento?.(pessoa.id)
+                && !this.registro.afastado?.(pessoa.id, liderId));
+            if (participantes.has(funcionario.id) && disponiveisNovos.length) {
+                return `Distribua a etapa para ${disponiveisNovos[0]!.nome}, que ainda não participou e está disponível.`;
+            }
         }
         pedido.delegacoes++;
         const execucao = this.executar(pedido, funcionario, tarefa,
@@ -186,7 +216,7 @@ export class Orquestracao {
                 + (pedido.arquivoId ? instrucoesDelegadoRefinamento
                     : 'Antes de encerrar, use registrar_validacao com critérios e evidências reais. '
                         + 'Marque como pendente qualquer teste ou inspeção visual que não conseguiu executar.'),
-            lider);
+            this.prazos.delegadoMs, lider);
         pedido.pendentes.add(execucao);
         try {
             const resposta = await execucao;
@@ -196,7 +226,7 @@ export class Orquestracao {
                 return `Etapa de ${funcionario.nome}: ${resposta.ok ? 'encerrada' : 'não concluída'}.\n`
                     + `${resposta.texto}\n${this.equipeRefinamento(liderId, pedido.id)}\n`
                     + 'Passe a próxima etapa a um colega disponível que ainda não participou. '
-                    + 'Se todos já participaram, consulte abrir_arquivo e continue o refinamento.';
+                    + 'Se todos já participaram, delegue novamente a quem estiver disponível.';
             }
             return `Trabalho ${trabalho?.id}. ${funcionario.nome}: `
                 + `${resposta.ok ? 'execução encerrada, ainda exige revisão' : 'não concluiu'}\n${resposta.texto}`
@@ -204,6 +234,23 @@ export class Orquestracao {
         } finally {
             pedido.pendentes.delete(execucao);
         }
+    }
+
+    private interromperDelegado(pedido: PedidoAtivo, funcionarioId: string): void {
+        pedido.interrompidos.add(funcionarioId);
+        this.registro.interromper(funcionarioId);
+    }
+
+    /** Interrompe a etapa delegada em andamento para o líder seguir com outro colega ou refinar sozinho. */
+    cancelarDelegacao(liderId: string): string {
+        const pedido = [...this.ativos.values()].find((item) => item.liderId === liderId && !item.cancelado);
+        if (!pedido) return 'A delegação só está disponível para o líder de um pedido ativo no Work.';
+        const delegados = [...pedido.funcionarios].filter((id) => id !== liderId);
+        if (!delegados.length) return 'Nenhuma etapa delegada em andamento.';
+        for (const id of delegados) this.interromperDelegado(pedido, id);
+        const nomes = this.registro.funcionarios().filter((pessoa) => delegados.includes(pessoa.id))
+            .map((pessoa) => pessoa.nome).join(', ');
+        return `Etapa de ${nomes} cancelada. Delegue ao próximo colega disponível ou refine você mesmo.`;
     }
 
     /** Guarda evidências do próprio turno ativo; não concede aprovação nem recompensa. */
@@ -354,7 +401,7 @@ export class Orquestracao {
     }
 
     private async executar(
-        pedido: PedidoAtivo, funcionario: Funcionario, tarefa: string, prompt: string,
+        pedido: PedidoAtivo, funcionario: Funcionario, tarefa: string, prompt: string, prazoMs: number,
         solicitante?: Funcionario,
     ): Promise<RespostaTrabalho> {
         const id = randomUUID();
@@ -373,26 +420,28 @@ export class Orquestracao {
         };
         this.registro.gravar([...this.registro.trabalhos(), registro]);
         this.registro.acontecer?.(registro, 'delegacao');
-        let resposta: RespostaTrabalho;
-        try {
-            resposta = await this.registro.executar(
-                funcionario, pedido.projeto, prompt, pedido.threadId, (mensagem) => this.registrarEventos(id, mensagem),
-            );
-        } catch (erro) {
-            resposta = { ok: false, texto: erro instanceof Error ? erro.message : String(erro) };
+        const chamada = this.registro.executar(
+            funcionario, pedido.projeto, prompt, pedido.threadId, (mensagem) => this.registrarEventos(id, mensagem),
+        ).catch((erro): RespostaTrabalho => ({ ok: false, texto: erro instanceof Error ? erro.message : String(erro) }));
+        let resposta = await aguardarAte(chamada, prazoMs);
+        if (!resposta) {
+            this.interromperDelegado(pedido, funcionario.id);
+            await aguardarAte(chamada, this.prazos.toleranciaMs);
+            resposta = { ok: false, texto: `${funcionario.nome} excedeu o tempo da etapa e foi interrompido.` };
         }
         pedido.funcionarios.delete(funcionario.id);
+        const interrompido = pedido.cancelado || pedido.interrompidos.delete(funcionario.id);
         this.registro.gravar(this.registro.trabalhos().map((item) => item.id === id ? {
             ...item, resultado: resposta.texto,
-            estado: pedido.cancelado ? 'interrompido' : resposta.ok ? 'concluido' : 'falhou',
-            falhaTecnica: !pedido.cancelado && !resposta.ok,
+            estado: interrompido ? 'interrompido' : resposta.ok ? 'concluido' : 'falhou',
+            falhaTecnica: !interrompido && !resposta.ok,
             avaliacao: { ...item.avaliacao!,
-                estado: !pedido.cancelado && resposta.ok && !this.pendencia(item)
+                estado: !interrompido && resposta.ok && !this.pendencia(item)
                     ? 'aguardando_aprovacao' : 'pendente',
-                motivo: pedido.cancelado ? 'Execução interrompida.' : !resposta.ok ? resposta.texto
+                motivo: interrompido ? 'Execução interrompida.' : !resposta.ok ? resposta.texto
                     : this.pendencia(item) ?? undefined },
         } : item));
-        if (!pedido.cancelado && resposta.ok) this.registro.acontecer?.(
+        if (!interrompido && resposta.ok) this.registro.acontecer?.(
             { ...registro, resultado: resposta.texto, estado: resposta.ok ? 'concluido' : 'falhou' },
             resposta.ok ? 'entrega' : 'falha',
         );

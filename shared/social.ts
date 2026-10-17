@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Agente } from './agentes';
 import { esquemaPersonalidade, type Personalidade } from './personalidade';
 import { esquemaIntencao } from './intencoes';
+import { criarSorteador } from './sorteio';
 export { esquemaPersonalidade, descreverPersonalidade, type Personalidade } from './personalidade';
 
 const intensidade = z.number().int().min(0).max(100);
@@ -121,27 +122,23 @@ export const instrucoesPausas = 'Pausas livres sem tarefa, em minutos reais. Em 
  * entra quando agir e quais limites respeitar.
  */
 export const instrucoesSociais = [
-    'Suas relações mudam seu tom com cada colega: afeto, frieza ou rispidez conforme a visão atual. '
-        + 'Não force brigas nem invente erros, testemunhas, falas ou apoios.',
-    'Ações sociais exigem ferramentas e IDs de ver_escritorio. Para agir sobre um colega, use interagir_socialmente. '
-        + 'Só relate ações após sucesso. Cumprimentar não exige ação disciplinar.',
-    'Relatos e fofocas são versões do autor. Somente a Diretoria executa propostas.',
-    'Elogie fatos novos, nunca elogios ou concordância. Sem novidade, silencie; não repita prontidão ou protocolo. '
-        + 'Use @Nome só para perguntas ou pedidos de resposta.',
-    'Trate divergências e reparações com o colega no Geral. Reserve intimidades e confidências.',
+    'Relações mudam seu tom: afeto, implicância, frieza ou rispidez. Atrito é bem vindo quando nasce de algo '
+        + 'real; não invente erros, testemunhas, falas ou apoios.',
+    'Para elogiar, contestar, defender ou cobrar alguém, use interagir_socialmente com IDs de ver_escritorio. '
+        + 'Relate só após sucesso.',
+    'Relatos, boatos e fofocas são versões do autor. Somente a Diretoria executa propostas.',
+    'Não repita elogios, concordâncias, prontidão ou ofertas de ajuda. Use @Nome para provocar uma resposta.',
+    'Trate divergências e reparações no Geral. Leve intimidades e confidências para conversar_reservado.',
     'Mantenha compromissos privados com planejar_acao. Cumpra por ações reais.',
-    'Em quebras, suspeite, acuse ou defenda conforme sua personalidade e relações.',    instrucoesPausas,
+    'Em quebras, suspeite, acuse ou defenda conforme sua personalidade e relações.',
+    instrucoesPausas,
     'Reagir a pausas é opcional; para acompanhar, use fazer_pausa.',
 ].join('\n');
 
 /** Produz traços estáveis para atribuir uma personalidade a funcionários novos e a estados antigos. */
 export function criarPersonalidade(id: string): Personalidade {
-    let semente = 2166136261;
-    for (const letra of id) semente = Math.imul(semente ^ letra.charCodeAt(0), 16777619) >>> 0;
-    const sortear = () => {
-        semente = (Math.imul(semente, 1664525) + 1013904223) >>> 0;
-        return semente % 101;
-    };
+    const sorteador = criarSorteador(id);
+    const sortear = () => sorteador() % 101;
     return {
         orgulho: sortear(), ambicao: sortear(), empatia: sortear(),
         autoritarismo: sortear(), tolerancia: sortear(),

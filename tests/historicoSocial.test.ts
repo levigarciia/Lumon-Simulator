@@ -10,7 +10,7 @@ import { Persistencia } from '../electron/services/persistencia';
 import { estadoInicial } from '../shared/estado';
 import type { Funcionario } from '../shared/funcionarios';
 import { falasDoChat } from '../shared/geral';
-import { gerarArquivo } from '../shared/refinamento';
+import { formatarPrazo, gerarArquivo } from '../shared/refinamento';
 
 test('limpeza arquiva recados e propostas, preserva manutenção ativa e permite consultar o passado pelo MCP', async () => {
     const pasta = await mkdtemp(join(tmpdir(), 'lumon-historico-'));
@@ -111,7 +111,7 @@ test('limpeza arquiva recados e propostas, preserva manutenção ativa e permite
             nome: arquivo.nome, projetoId: 'macrodados', tarefa: 'Refinar.', resultado: '', estado: 'trabalhando',
             criadoEm: new Date().toISOString(), arquivoId: arquivo.id });
         const avisoArquivo = reaberto['social'].registrar({ tipo: 'comunicado', autorId: 'diretoria',
-            texto: `A Diretoria entregou o arquivo ${arquivo.nome} para refinamento no Work. Prazo: ${arquivo.prazo}.`,
+            texto: `A Diretoria entregou o arquivo ${arquivo.nome} para refinamento no Work. Prazo: ${formatarPrazo(arquivo)}.`,
             alcance: 'publico', ouvintes: [], fontes: [] }, false);
         expect(reaberto.limparGeral().ok).toBe(true);
         expect(falasDoChat([], reaberto.publico().social.eventos).map((fala) => fala.id)).toEqual([avisoArquivo.id]);

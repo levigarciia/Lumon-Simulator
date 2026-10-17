@@ -10,7 +10,7 @@ import { estadoInicial } from '../shared/estado';
 import { esquemaCatalogoEscritorios } from '../shared/partidas';
 import { Persistencia } from '../electron/services/persistencia';
 import { lerJson } from '../electron/services/arquivosEstado';
-import { progressoRefinamento } from '../shared/refinamento';
+import { formatarPrazo, progressoRefinamento } from '../shared/refinamento';
 
 const pastaDados = join(process.env.APPDATA!, 'lumon');
 const catalogo = await lerJson(join(pastaDados, 'escritorios.json'));
@@ -57,7 +57,7 @@ escritorio['expediente']['abrirSessao'] = (_pessoa, configuracao) => criarSessao
 escritorio['geral']['abrirSessao'] = () => ({ enviar: async () => {}, encerrar: () => {} });
 try {
     const resultado = escritorio['orquestracao'].enviar(projeto.id,
-        `Refine o arquivo ${arquivo.nome}. Prazo: ${arquivo.prazo}.`, 'principal', undefined, arquivo.id);
+        `Refine o arquivo ${arquivo.nome}. Prazo: ${formatarPrazo(arquivo)}.`, 'principal', undefined, arquivo.id);
     if (!resultado.ok) throw new Error(resultado.erro);
     const limite = Date.now() + 6 * 60000;
     let ultimaOrdem = 0;

@@ -24,6 +24,21 @@ import { cotaAtual, esquemaCota, diaDoExpediente } from './departamento';
 
 export const moedasIniciais = 600;
 
+export const esquemaPausaSalva = z.object({
+    id: z.string().min(1),
+    iniciadaEm: z.string(),
+    itemId: z.string().min(1),
+    indiceUso: z.number().int().nonnegative(),
+    atividade: z.enum(['cafe', 'comendo', 'descansando', 'ouvindo_musica']),
+    origem: z.literal('ferramenta'),
+    segundos: z.number().positive(),
+    terminaEm: z.number().nullable(),
+    atualizadoEm: z.number().nullable(),
+    limite: z.number().nonnegative(),
+});
+
+export type PausaSalva = z.infer<typeof esquemaPausaSalva>;
+
 /** Recompensa base por pedido aprovado pela Diretoria. */
 export const recompensaTarefa = 25;
 
@@ -56,6 +71,7 @@ export const esquemaEstado = z.object({
     relogio: z.number().min(0).default(0),
     diaNecessidades: z.string().default(() => diaDoExpediente()),
     necessidades: z.record(z.string(), esquemaNecessidades).default({}),
+    pausas: z.record(z.string(), esquemaPausaSalva).default({}),
     ausencias: z.record(z.string(), esquemaAusencia).default({}),
     carreira: esquemaCarreira.default({}),
     necessidadesLiberadas: esquemaNecessidadesLiberadas.default([]),
@@ -87,6 +103,7 @@ export function estadoInicial(): EstadoSalvo {
         relogio: 0,
         diaNecessidades: diaDoExpediente(),
         necessidades: {},
+        pausas: {},
         ausencias: {},
         carreira: {},
         necessidadesLiberadas: [],

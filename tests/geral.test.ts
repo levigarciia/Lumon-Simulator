@@ -2,7 +2,20 @@ import { expect, test } from 'bun:test';
 import { CanalGeral } from '../electron/services/geral';
 import type { SessaoAgente } from '../electron/services/harness/tipos';
 import type { Funcionario } from '../shared/funcionarios';
-import { esquemaMensagemGeral, repeteFala, type MensagemGeral } from '../shared/geral';
+import {
+    contarFalasDoEmbate, ehSilencio, encontrarInterpelados, esquemaMensagemGeral, removerAutoVocativo, removerFrasesRepetidas, repeteFala,
+    type MensagemGeral,
+} from '../shared/geral';
+
+test('anúncio curto de silêncio não vira fala pública', () => {
+    expect(ehSilencio('Não há nada novo para tratar hoje, então vou guardar silêncio.')).toBe(true);
+    expect(ehSilencio('O silêncio e a prontidão são a melhor postura.')).toBe(false);
+});
+
+test('autor não se dirige a si mesmo pelo nome', () => {
+    expect(removerAutoVocativo('Jamal, concordo com você.', 'Jamal')).toBe('Concordo com você.');
+    expect(removerAutoVocativo('Gwen, concordo.', 'Jamal')).toBe('Gwen, concordo.');
+});
 
 test('repetição tolera pequenas variações sem descartar perguntas ou mudanças de informação', () => {
     const fala = 'Sem arquivo ativo no Work, não há etapas para redistribuir. Vamos aguardar o comunicado da Diretoria.';
@@ -12,6 +25,9 @@ test('repetição tolera pequenas variações sem descartar perguntas ou mudanç
     expect(repeteFala(fala.replace('não há', 'há'), fala)).toBe(false);
     expect(repeteFala(`${fala} Temos 2 arquivos.`, `${fala} Temos 3 arquivos.`)).toBe(false);
     expect(repeteFala('Bom dia.', 'Bom dia.')).toBe(false);
+    const copiada = 'sua observação sobre a redundância das mesas é perspicaz. Às vezes a Lumon precisa de '
+        + 'duplicatas para validar a própria existência. Mas vamos focar no trabalho.';
+    expect(repeteFala(`@Claudio, parabéns pela liderança. Sua ${copiada}`, `@Gepeto, ${copiada}`)).toBe(true);
 });
 
 const claudio: Funcionario = {
@@ -78,6 +94,34 @@ test('nova pausa da mesma dupla abre outra sessão sem reaproveitar a situação
     } finally { canal.encerrar(); }
 });
 
+test('encerra o encontro reservado após a última resposta sem cortar a resposta enfileirada', async () => {
+    const jamal: Funcionario = { ...claudio, id: 'jamal', nome: 'Jamal' };
+    const turnos: string[] = [];
+    const encontrosEncerrados: string[][] = [];
+    let canal!: CanalGeral;
+    canal = new CanalGeral({
+        funcionarios: () => [claudio, jamal], mensagens: () => [], gravar: () => {}, contexto: () => '',
+        urlMcp: async () => 'http://localhost', pasta: '.', emitirMensagens: () => {}, emitirEstado: () => {},
+        responderReservado: (id, colegaId) => {
+            canal.notificarReservado(colegaId, id, 'Responda à fala privada.');
+            return 'Resposta privada enviada.';
+        },
+        conversaReservadaEncerrada: (id, colegaId) => encontrosEncerrados.push([id, colegaId].sort()),
+    }, (funcionario) => ({
+        enviar: async (_prompt, ouvinte) => {
+            turnos.push(funcionario.id);
+            if (funcionario.id === claudio.id) ouvinte.texto('Oi, Jamal.');
+        },
+        encerrar: () => {},
+    }));
+    try {
+        canal.notificarReservado(claudio.id, jamal.id, 'Inicie a conversa privada.');
+        await estabilizar();
+        expect(turnos).toEqual([claudio.id, jamal.id]);
+        expect(encontrosEncerrados).toEqual([[claudio.id, jamal.id]]);
+    } finally { canal.encerrar(); }
+});
+
 test('relato longo idêntico não reaparece por notificações, mas um novo pedido pode pedir repetição', async () => {
     const texto = 'Estou pronto para o próximo arquivo. Minha energia está boa e a fome foi atendida. '
         + 'Aguardo o próximo comunicado da Diretoria.';
@@ -94,7 +138,7 @@ test('relato longo idêntico não reaparece por notificações, mas um novo pedi
     } finally { caso.canal.encerrar(); }
 });
 
-test('menções repetidas entre dois colegas não impedem a vez do terceiro', async () => {
+test('o citado fala em seguida e as menções entre dois colegas não impedem a vez do terceiro', async () => {
     const gwen = { ...claudio, id: 'gwen', nome: 'Gwen' };
     const jamal = { ...claudio, id: 'jamal', nome: 'Jamal' };
     let mensagens: MensagemGeral[] = [];
@@ -112,11 +156,67 @@ test('menções repetidas entre dois colegas não impedem a vez do terceiro', as
     }));
     try {
         canal.enviarDoUsuario('Como vocês estão?');
-        for (let passo = 0; passo < 8; passo++) await estabilizar();
-        expect(ordem.slice(0, 3)).toEqual(['claudio', 'gwen', 'jamal']);
+        for (let passo = 0; passo < 20; passo++) await estabilizar();
+        expect(ordem.slice(0, 3)).toEqual(['claudio', 'gwen', 'claudio']);
         expect(mensagens.some((mensagem) => mensagem.autorId === jamal.id && mensagem.texto)).toBe(true);
         expect(canal.situacao().conversaAtiva).toBe(false);
     } finally { canal.encerrar(); }
+});
+
+function prepararOrdem(equipe: Funcionario[], iniciais: MensagemGeral[] = []) {
+    let mensagens = iniciais;
+    const ordem: string[] = [];
+    const canal = new CanalGeral({
+        funcionarios: () => equipe, mensagens: () => mensagens,
+        gravar: (novas) => { mensagens = novas; }, contexto: () => '',
+        urlMcp: async () => 'http://localhost', pasta: '.', emitirMensagens: () => {}, emitirEstado: () => {},
+    }, (pessoa) => ({
+        enviar: semReacao(async (_prompt, ouvinte) => {
+            ordem.push(pessoa.id);
+            ouvinte.texto(`Fala de ${pessoa.nome} sem citar ninguém.`);
+        }), encerrar: () => {},
+    }));
+    return { canal, ordem };
+}
+
+test('sem menção, o líder abre a rodada', async () => {
+    const gepeto = { ...claudio, id: 'gepeto', nome: 'Gepeto', cargo: 'refinador' as const };
+    const caso = prepararOrdem([gepeto, claudio]);
+    try {
+        caso.canal.enviarDoUsuario('Boas vindas a todos.');
+        for (let passo = 0; passo < 6; passo++) await estabilizar();
+        expect(caso.ordem).toEqual(['claudio', 'gepeto']);
+    } finally { caso.canal.encerrar(); }
+});
+
+test('menção pendente antes da rodada dá a primeira vez ao citado', async () => {
+    const gepeto = { ...claudio, id: 'gepeto', nome: 'Gepeto', cargo: 'refinador' as const };
+    const pendente: MensagemGeral = {
+        id: 'm1', autorId: 'claudio', texto: 'Gepeto, o que você acha?', criadaEm: '', ferramentas: [],
+    };
+    const caso = prepararOrdem([gepeto, claudio], [pendente]);
+    try {
+        caso.canal.enviarDoUsuario('Continuem.');
+        for (let passo = 0; passo < 6; passo++) await estabilizar();
+        expect(caso.ordem).toEqual(['gepeto', 'claudio']);
+    } finally { caso.canal.encerrar(); }
+});
+
+test('vocativo no início da frase conta como citação, mas o nome no meio não', () => {
+    const equipe = [{ id: 'c', nome: 'Cláudio' }, { id: 'g', nome: 'Gepeto' }];
+    expect(encontrarInterpelados('Claudio, você tem razão.', equipe).map((pessoa) => pessoa.id)).toEqual(['c']);
+    expect(encontrarInterpelados('Concordo. Gepeto: e você?', equipe).map((pessoa) => pessoa.id)).toEqual(['g']);
+    expect(encontrarInterpelados('Falei com o Gepeto ontem.', equipe)).toEqual([]);
+});
+
+test('frases copiadas das falas recentes saem da nova fala', () => {
+    const anterior = 'Gepeto, você tem razão.\n\nFala sério.';
+    expect(removerFrasesRepetidas('Não concordo com isso. Fala sério.', [anterior])).toBe('Não concordo com isso.');
+    expect(removerFrasesRepetidas('Fala sério.', [anterior])).toBe('');
+    expect(removerFrasesRepetidas('Uma ideia nova.\nOutra linha.', [anterior])).toBe('Uma ideia nova.\nOutra linha.');
+    const diretoria = 'Parabéns por terem chegado até aqui.';
+    expect(removerFrasesRepetidas('Obrigado. Parabéns por terem chegado até aqui.', [], [diretoria])).toBe('Obrigado.');
+    expect(removerFrasesRepetidas('Estou bem.', [], ['Estou bem.'])).toBe('Estou bem.');
 });
 
 test('novas notificações após o limite não repetem o aviso nem geram turnos adicionais', async () => {
@@ -533,6 +633,40 @@ test('citado passa pelo turno de reação com ferramenta obrigatória antes de r
             .toEqual(['@Gepeto, faça a tarefa.', 'Certo.']);
         expect(instrucoesLider).toContain('acao cobrar');
         expect(instrucoesLider).toContain('tipo demissao');
+    } finally { canal.encerrar(); }
+});
+
+test('embate conta só a troca recente entre os dois colegas', () => {
+    const falas = (autores: string[]) => autores.map((autorId) => ({ autorId }));
+    expect(contarFalasDoEmbate(falas(['usuario', 'a', 'b', 'a', 'sistema', 'b']), 'b', 'a')).toBe(4);
+    expect(contarFalasDoEmbate(falas(['b', 'c', 'a', 'a']), 'a', 'b')).toBe(0);
+});
+
+test('discussão em ciclo leva o citado a agir em vez de rebater outra vez', async () => {
+    const colega = { ...claudio, id: 'gepeto', nome: 'Gepeto', cargo: 'desenvolvedor' as const };
+    const briga = Array.from({ length: 5 }, (_, indice): MensagemGeral => ({
+        id: `m${indice}`, autorId: indice % 2 ? colega.id : claudio.id, texto: `Argumento ${indice}.`,
+        criadaEm: '', ferramentas: [],
+    }));
+    let mensagens: MensagemGeral[] = briga;
+    const turnos: { pessoa: string; reacao: boolean; prompt: string; ferramentas?: string[] }[] = [];
+    const canal: CanalGeral = new CanalGeral({
+        funcionarios: () => [claudio, colega], mensagens: () => mensagens,
+        gravar: (novas) => { mensagens = novas; }, contexto: () => '',
+        urlMcp: async () => 'http://localhost', pasta: '.', emitirMensagens: () => {}, emitirEstado: () => {},
+    }, (pessoa) => ({
+        enviar: async (prompt, _ouvinte, _sinal, opcoes) => {
+            turnos.push({ pessoa: pessoa.id, reacao: !!opcoes?.exigirFerramenta, prompt,
+                ferramentas: opcoes?.ferramentas });
+        }, encerrar: () => {},
+    }));
+    try {
+        canal.falarDoAgente(claudio.id, 'Gepeto, você continua errado.');
+        await estabilizar();
+        expect(turnos.map((turno) => `${turno.pessoa}:${turno.reacao}`)).toEqual(['gepeto:true']);
+        expect(turnos[0]!.prompt).toContain('6 falas seguidas');
+        expect(turnos[0]!.ferramentas).toContain('interagir_socialmente');
+        expect(turnos[0]!.ferramentas).not.toContain('nenhuma_acao');
     } finally { canal.encerrar(); }
 });
 

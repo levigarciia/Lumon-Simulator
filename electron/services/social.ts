@@ -11,7 +11,9 @@ import { impactosEsgotamento } from '../../shared/esgotamento';
 import { caminhosCarreira, type CargoDestino } from '../../shared/carreira';
 import type { CargoAtual } from '../../shared/cargos';
 import { repeteFala } from '../../shared/geral';
-import { aplicarReacao, descreverCondutaRelacional, registrarImpactoRelacao } from '../../shared/relacoes';
+import {
+    aplicarReacao, descreverCondutaRelacional, registrarImpactoRelacao, resumirRelacao,
+} from '../../shared/relacoes';
 import {
     aplicarInteracao, colegasProximos, criarPersonalidade, descreverPersonalidade, nomesProposta,
     podeConhecer, relacaoInicial, esquemaFiltroHistorico,
@@ -185,9 +187,10 @@ export class DinamicaSocial {
 
     /** Executa falas sociais com audiência validada e fontes que o autor realmente conhece. */
     interagir(
-        autorId: string, alvoId: string, acao: AcaoSocial | 'reservado', texto: string,
+        autorId: string, referenciaAlvo: string, acao: AcaoSocial | 'reservado', texto: string,
         alcance: EventoSocial['alcance'], fontes: string[], trabalhoId?: string, sobreId?: string,
     ): string {
+        const alvoId = this.idDe(referenciaAlvo);
         const erro = this.validarInteracao(autorId, alvoId, acao, texto, fontes, sobreId);
         if (erro) return erro;
         const chaveAcao = [autorId, alvoId, acao, ...[...fontes].sort()].join(':');
@@ -226,9 +229,10 @@ export class DinamicaSocial {
      * interrupção cancela.
      */
     async interagirComEncontro(
-        autorId: string, alvoId: string, acao: AcaoSocial | 'reservado', texto: string,
+        autorId: string, referenciaAlvo: string, acao: AcaoSocial | 'reservado', texto: string,
         alcance: EventoSocial['alcance'], fontes: string[], sobreId?: string,
     ): Promise<string> {
+        const alvoId = this.idDe(referenciaAlvo);
         const erro = this.validarInteracao(autorId, alvoId, acao, texto, fontes, sobreId);
         if (erro) return erro;
         if (alcance === 'reservado' && this.registro.encontrar) {
@@ -417,8 +421,7 @@ export class DinamicaSocial {
                 + 'consultar_acontecimento lê o registro completo. Consulte antes de afirmar detalhes antigos.';
         const personalidade = estado.personalidades[id] ?? criarPersonalidade(id);
         const relacoes = estado.relacoes.filter((item) => item.autorId === id).map((item) =>
-            `${this.nome(item.colegaId)} [${item.colegaId}]: confiança ${item.confianca}, afinidade ${item.afinidade}, `
-            + `respeito ${item.respeito}, ressentimento ${item.ressentimento}. `
+            `${this.nome(item.colegaId)} [${item.colegaId}]: ${resumirRelacao(item)}. `
             + descreverCondutaRelacional(item, personalidade)
             + (item.marcadores?.length ? ` Sinais recentes: ${item.marcadores.slice(-2)
                 .map((marcador) => marcador.rotulo).join(', ')}.` : ''));
@@ -639,6 +642,11 @@ export class DinamicaSocial {
     ): string | undefined {
         const erro = this.validarPessoas(autorId, alvoId) ?? this.validarTexto(texto);
         if (erro) return erro;
+        if (this.repeteAoColega(autorId, alvoId, texto, acao === 'reservado')) {
+            return acao === 'reservado'
+                ? 'Você acabou de dizer isso ao colega. Aguarde a resposta ou traga um assunto novo.'
+                : 'Você já disse isso. Repetir o argumento não muda nada: ceda, mude de assunto ou silencie.';
+        }
         if (sobreId && !this.existe(sobreId)) {
             return 'O campo sobre aceita apenas o ID de uma pessoa da equipe. '
                 + 'Omita esse campo se você quer apenas descrever o assunto ou citar um trabalho.';
@@ -686,9 +694,26 @@ export class DinamicaSocial {
         }
     }
 
+    private repeteAoColega(autorId: string, alvoId: string, texto: string, reservado: boolean): boolean {
+        const normalizar = (valor: string) => valor.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+            .replace(/[^\p{L}\d]/gu, '');
+        const recentes = this.acontecimentos().filter((evento) => evento.autorId === autorId
+            && (reservado ? evento.tipo === 'reservado' && evento.alvoId === alvoId
+                : evento.tipo === 'fala' || (evento.tipo !== 'reservado' && evento.alvoId === alvoId)))
+            .sort((a, b) => b.sequencia - a.sequencia).slice(0, reservado ? 3 : 8);
+        return recentes.some((evento) => normalizar(evento.texto) === normalizar(texto)
+            || repeteFala(texto, evento.texto));
+    }
+
+    /** Aceita nome ou ID do colega, devolvendo a referência original quando não há correspondência única. */
+    idDe(referencia: string): string {
+        const pessoa = this.resolverPessoa(referencia);
+        return 'id' in pessoa ? pessoa.id : referencia;
+    }
+
     private validarPessoas(autorId: string, alvoId: string): string | undefined {
         if (!this.existe(autorId) || !this.existe(alvoId)) {
-            return 'Funcionário não encontrado. Use em funcionario o ID exato de ver_escritorio, não o nome.';
+            return 'Funcionário não encontrado. Use em funcionario o nome completo ou o ID de ver_escritorio.';
         }
         if (autorId === alvoId) {
             return 'Esse ID é o seu. Para falar com a Diretoria, responda em texto normal.';

@@ -1,13 +1,15 @@
 import { preservarLembrancas } from '../../shared/memoria';
-import { apagarConversaHistorica, excluirRegistros, listarHistorico } from './historico';
+import {
+    apagarConversaHistorica, excluirArquivosWork, excluirHistoricoCompleto, excluirRegistros, listarHistorico,
+} from './historico';
 import type { RegistroHistorico } from '../../shared/historico';
 import { randomUUID } from 'node:crypto';
 import { cotaAtual, creditarArquivo, comunicadoDiretoria, metaDiaria, bonusCotaDiaria } from '../../shared/departamento';
 import { custoConserto, registrarUso, repararItem } from '../../shared/manutencao';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { gerarArquivo, descreverGrade, refinar, progressoRefinamento, recompensaRefinamento,
-    nomeProjetoMacrodados, orientarRefinamento, descreverEnvios, type Temperamento } from '../../shared/refinamento';
+import { gerarArquivo, descreverGrade, refinar, problemaSelecao, progressoRefinamento, recompensaRefinamento,
+    nomeProjetoMacrodados, orientarRefinamento, descreverEnvios, formatarPrazo, type Temperamento } from '../../shared/refinamento';
 import {
     catalogo,
     comItem,
@@ -59,6 +61,12 @@ import { esquemaThread, threadPrincipal, type Thread } from '../../shared/thread
 
 const sucesso: Resultado = { ok: true };
 const intervaloIniciativaMs = 120000;
+const limiteSelecoesRecusadasDelegado = 3;
+const limiteSelecoesRecusadasLider = 6;
+const ferramentasDoRefinamento = [
+    'delegar', 'cancelar_delegacao', 'abrir_arquivo', 'refinar', 'falar_com_responsavel', 'revisar_trabalho',
+    'pedir_refazer',
+];
 const prefixoRelatoChat ='Relato da Diretoria no chat individual, não verificado: ';
 
 const rotulosStatus: Record<StatusFuncionario, string> = {
@@ -67,6 +75,7 @@ const rotulosStatus: Record<StatusFuncionario, string> = {
     bloqueado: 'esperando aprovação da Diretoria',
     erro: 'serviço de IA indisponível',
     em_pausa: 'em pausa',
+    conversando: 'conversando',
 };
 
 function falha(erro: string): Resultado {
@@ -87,6 +96,7 @@ export class Escritorio {
     private pessoal: DepartamentoPessoal;
     private agenda: AgendaDepartamento;
     private ultimasIniciativas = new Map<string, number>();
+    private selecoesRecusadas = new Map<string, number>();
 
     constructor(
         private estado: EstadoSalvo,
@@ -112,6 +122,21 @@ export class Escritorio {
         this.estado.historicoPensamentos = estado.historicoPensamentos ?? {};
         for (const pensamento of [...Object.values(this.estado.pensamentos),
             ...Object.values(this.estado.historicoPensamentos).flat()]) pensamento.id ??= randomUUID();
+        const recuperarFerramenta = (ferramenta: Mensagem['ferramentas'][number]) =>
+            ferramenta.estado === 'rodando' ? { ...ferramenta, estado: 'recusada' as const,
+                concluidaEm: new Date().toISOString(), saida: 'O aplicativo foi encerrado durante esta ação.' }
+                : ferramenta;
+        this.estado.conversas = Object.fromEntries(Object.entries(this.estado.conversas ?? {}).map(([id, mensagens]) => [
+            id,
+            mensagens.map((mensagem) => {
+                if (!mensagem.ferramentas.some((ferramenta) => ferramenta.estado === 'rodando')) return mensagem;
+                return { ...mensagem, erro: mensagem.erro ?? 'Tarefa interrompida.',
+                    ferramentas: mensagem.ferramentas.map(recuperarFerramenta),
+                    partes: mensagem.partes?.map((parte) => parte.tipo === 'ferramenta'
+                        ? { ...parte, ferramenta: recuperarFerramenta(parte.ferramenta) } : parte),
+                };
+            }),
+        ]));
         this.estado.social = estado.social ?? esquemaSocial.parse({});
         this.estado.trabalhos = (estado.trabalhos ?? []).map((item) => item.estado === 'trabalhando'
             ? { ...item, estado: 'interrompido', resultado: 'O aplicativo foi encerrado durante este trabalho.',
@@ -136,6 +161,13 @@ export class Escritorio {
                 if (ausencia && !conversaDuranteAusencia(ausencia.motivo)) return `Você está fora da sala (${nomesAusencia[ausencia.motivo].toLowerCase()}).`;
                 if (origem === 'trabalho' && !['revisar_trabalho', 'ver_escritorio', 'consultar'].includes(nome)
                     && !this.arquivoAtivo(id)) return 'Nenhum refinamento ativo.';
+                const refinando = !!this.arquivoAtivo(id);
+                if (origem === 'trabalho' && refinando && !ferramentasDoRefinamento.includes(nome)) {
+                    return 'Durante o refinamento, use apenas as ferramentas do Work.';
+                }
+                if (origemSocial(origem) && refinando) {
+                    return 'Você está refinando no Work. Conclua a etapa antes de outras ações.';
+                }
                 if (origem === 'trabalho' && this.estadoEtapa(id).terminal
                     && !['abrir_arquivo', 'refinar', 'ver_escritorio', 'revisar_trabalho', 'consultar']
                         .includes(nome)) {
@@ -163,8 +195,14 @@ export class Escritorio {
             falarComResponsavel: (id, mensagem) => this.falarComResponsavel(id, mensagem),
             atualizarPensamento: (id, pensamento) => this.atualizarPensamento(id, pensamento),
             silenciar: (id) => this.geral.guardarSilencio(id),
-            delegar: (id, destino, tarefa) => this.orquestracao.delegar(id, destino, tarefa),
-            interagir: async (id, destino, acao, mensagem, alcance, fontes, sobreId, origem) => {
+            delegar: async (id, destino, tarefa) => {
+                const problema = this.problemaNaTarefaDelegada(id, tarefa);
+                if (problema) return `Delegação recusada: ${problema} Confira a grade em abrir_arquivo.`;
+                return this.orquestracao.delegar(id, destino, tarefa);
+            },
+            cancelarDelegacao: (id) => this.orquestracao.cancelarDelegacao(id),
+            interagir: async (id, referencia, acao, mensagem, alcance, fontes, sobreId, origem) => {
+                const destino = this.social.idDe(referencia);
                 if (this.simulacao.emPausaNoItem(destino) && alcance !== 'reservado') {
                     return 'O colega está em pausa e indisponível no Geral. Converse somente em particular.';
                 }
@@ -225,13 +263,7 @@ export class Escritorio {
             contextoTurno: (id) => this.contextoTurno(id),
             confirmarPercepcao: (id, canal) => this.social.confirmarLeitura(id, canal),
             personalidade: (id) => this.social.personalidade(id),
-            ferramentasTrabalho: (id) => this.arquivoAtivo(id) ? [
-                'delegar', 'abrir_arquivo', 'refinar', 'ver_escritorio', 'fazer_pausa', 'atualizar_pensamento',
-                'falar_no_geral', 'falar_com_responsavel', 'conversar_reservado',
-                'consertar_item', 'interagir_socialmente', 'reagir_ao_acontecimento', 'propor_mudanca', 'escolher_carreira',
-                'consultar_acontecimento', 'consultar', 'revisar_trabalho', 'pedir_refazer',
-                'planejar_acao', 'cancelar_intencao',
-            ] : undefined,
+            ferramentasTrabalho: (id) => this.arquivoAtivo(id) ? [...ferramentasDoRefinamento] : undefined,
             urlMcp: (id, origem) => this.mcp.urlDe(id, origem),
             acontecer: (id, acontecimento) => this.simulacao.registrar(id, acontecimento),
             conversaEncerrada: (id) => this.liberarEncontroOcioso(id),
@@ -374,10 +406,14 @@ export class Escritorio {
             },
             relogioInicial: this.estado.relogio,
             necessidadesIniciais: this.estado.necessidades,
+            pausasIniciais: this.estado.pausas,
             gravar: (relogio, necessidades) => {
                 this.estado = { ...this.estado, relogio, necessidades: { ...necessidades } };
                 this.salvar(this.estado);
             },
+            gravarPausas: (pausas) => this.atualizar({ pausas }),
+            aoInterromperEncontro: (id, colegaId, preservarTurno) =>
+                this.geral.encerrarReservado(id, colegaId, preservarTurno ? id : undefined),
             emitirQuadro: (quadro) => this.emitir({ tipo: 'simulacao', quadro }),
             emitirEstado: () => this.publicar(),
             ausenciasIniciais: this.estado.ausencias,
@@ -482,6 +518,9 @@ export class Escritorio {
             responderReservado: (id, colegaId, texto) =>
                 this.social.interagirComEncontro(id, colegaId, 'reservado', texto.slice(0, 600), 'reservado', []),
             reservadoSemResposta: (id, colegaId) => this.social.respostaAusente(id, colegaId),
+            conversaReservadaEncerrada: (id, colegaId) => {
+                if (this.simulacao.parceiroEncontro(id) === colegaId) this.simulacao.cancelarEncontro(id);
+            },
             leitura: (id) => this.estado.leiturasGeral[id],
             gravarLeitura: (id, mensagemId) => this.atualizar({
                 leiturasGeral: { ...this.estado.leiturasGeral, [id]: mensagemId },
@@ -514,7 +553,9 @@ export class Escritorio {
             if (status[id] === 'trabalhando') status[id] = 'ocioso';
         }
         for (const funcionario of funcionarios) {
-            if (this.simulacao?.emPausa(funcionario.id)) status[funcionario.id] = 'em_pausa';
+            if (!this.estado.ausencias[funcionario.id] && this.simulacao?.parceiroEncontro(funcionario.id)) {
+                status[funcionario.id] = 'conversando';
+            } else if (this.simulacao?.emPausa(funcionario.id)) status[funcionario.id] = 'em_pausa';
         }
         return {
             moedas,
@@ -564,7 +605,7 @@ export class Escritorio {
             duracaoMinutos: minutos };
         this.atualizar({ refinamentos: { ...this.estado.refinamentos, [arquivo.id]: arquivo } });
         const resultado = this.orquestracao.enviar(projeto.id,
-            `Refine o arquivo ${arquivo.nome}. Prazo: ${arquivo.prazo}. ${this.descreverCota()}`,
+            `Refine o arquivo ${arquivo.nome}. Prazo: ${formatarPrazo(arquivo)}.`,
             threadPrincipal, undefined, arquivo.id);
         if (!resultado.ok) {
             const refinamentos = { ...this.estado.refinamentos };
@@ -587,10 +628,23 @@ export class Escritorio {
         if (progressoRefinamento(arquivo) === 100) return { codigo: 'arquivo_concluido', terminal: true };
         const trabalho = this.estado.trabalhos.findLast((item) => item.funcionarioId === id
             && item.estado === 'trabalhando');
+        if (trabalho && this.esgotouSelecoes(trabalho)) return { codigo: 'tentativas_esgotadas', terminal: true };
         const envios = arquivo.envios.filter((item) => item.trabalhoId === trabalho?.id);
         const terminou = !!trabalho?.solicitante?.id && (envios.length >= this.limiteEnvios(id)
             || envios.some((item) => item.resultado === 'aceito'));
         return { codigo: terminou ? 'etapa_encerrada' : 'etapa_ativa', terminal: terminou };
+    }
+
+    private esgotouSelecoes(trabalho: RegistroTrabalho): boolean {
+        const limite = trabalho.solicitante?.id ? limiteSelecoesRecusadasDelegado : limiteSelecoesRecusadasLider;
+        return (this.selecoesRecusadas.get(trabalho.id) ?? 0) >= limite;
+    }
+
+    private recusarSelecao(trabalho: RegistroTrabalho, motivo: string): string {
+        this.selecoesRecusadas.set(trabalho.id, (this.selecoesRecusadas.get(trabalho.id) ?? 0) + 1);
+        if (!this.esgotouSelecoes(trabalho)) return `Envio não registrado: ${motivo}`;
+        return `Envio não registrado: ${motivo} Você insistiu em seleções inválidas e sua etapa foi encerrada. `
+            + (trabalho.solicitante?.id ? 'Devolva ao líder o que foi testado.' : 'Resuma a entrega à Diretoria.');
     }
 
     private limiteEnvios(funcionarioId: string): number {
@@ -602,7 +656,7 @@ export class Escritorio {
         const arquivo = this.arquivoAtivo(funcionarioId);
         if (!arquivo) return 'Nenhum arquivo ativo neste turno.';
         if (Date.now() >= Date.parse(arquivo.prazo)) return 'Prazo encerrado. Resuma a entrega.';
-        return `Arquivo ${arquivo.nome}. Prazo: ${arquivo.prazo}. Progresso: ${progressoRefinamento(arquivo)}%.\n`
+        return `Arquivo ${arquivo.nome}. Prazo: ${formatarPrazo(arquivo)}. Progresso: ${progressoRefinamento(arquivo)}%.\n`
             + this.descreverCota() + '\n'
             + (progressoRefinamento(arquivo) === 100 ? 'Arquivo concluído. Resuma a entrega.\n' : '')
             + descreverGrade(arquivo) + '\nEnvios recentes da equipe:\n' + descreverEnvios(arquivo);
@@ -654,6 +708,13 @@ export class Escritorio {
             + comunicadoDiretoria(cota, true);
     }
 
+    private problemaNaTarefaDelegada(liderId: string, tarefa: string): string | undefined {
+        const arquivo = this.arquivoAtivo(liderId);
+        const celulas = tarefa.toUpperCase().match(/\b[A-H](?:10|[1-9])\b/g) ?? [];
+        if (!arquivo || celulas.length !== 3) return undefined;
+        return problemaSelecao(arquivo, celulas);
+    }
+
     private refinarArquivo(funcionarioId: string, celulas: string[], temperamento: Temperamento): string {
         const arquivo = this.arquivoAtivo(funcionarioId);
         if (!arquivo) return 'Nenhum arquivo ativo neste turno.';
@@ -667,11 +728,20 @@ export class Escritorio {
             || anteriores.some((item) => item.resultado === 'aceito'))) {
             return 'Sua etapa terminou. Devolva agora ao líder as células testadas, os resultados e as pendências.';
         }
+        if (this.esgotouSelecoes(trabalho)) return 'Sua etapa foi encerrada por seleções inválidas. Resuma o resultado.';
+        const problema = problemaSelecao(arquivo, celulas);
+        if (problema) return this.recusarSelecao(trabalho, problema);
         const envio = refinar(arquivo, funcionarioId, celulas, temperamento, trabalho.id);
+        if (envio.repetida) {
+            return this.recusarSelecao(trabalho, envio.repetida === 'aceita'
+                ? 'esse grupo já foi aceito. Escolha outra região.'
+                : 'essas células já foram rejeitadas. Escolha uma seleção diferente.');
+        }
         this.atualizar({ refinamentos: { ...this.estado.refinamentos, [arquivo.id]: envio.arquivo } });
         if (envio.resultado === 'aceito') this.ajustarMerito(funcionarioId, ganhosMerito.grupoAceito);
+        const enviosDaEtapa = envio.arquivo.envios.filter((item) => item.trabalhoId === trabalho.id).length;
         const etapaTerminou = trabalho.solicitante?.id
-            && (anteriores.length + 1 >= limite || envio.resultado === 'aceito');
+            && (enviosDaEtapa >= limite || envio.resultado === 'aceito');
         return `Envio: ${envio.resultado}. Progresso: ${progressoRefinamento(envio.arquivo)}%. `
             + orientarRefinamento(envio.resultado)
             + (progressoRefinamento(envio.arquivo) === 100 ? ' Arquivo concluído. Resuma a entrega.'
@@ -929,19 +999,42 @@ export class Escritorio {
     excluirRegistroHistorico(registroId: string): Resultado {
         const registro = this.obterHistorico().find((item) => item.id === registroId);
         if (!registro) return falha('Registro não encontrado.');
+        return this.aplicarExclusaoHistorico(registro.categoria === 'conversas' && registro.funcionarioId
+            ? (estado) => apagarConversaHistorica(estado, registro.funcionarioId!)
+            : (estado) => excluirRegistros(estado, new Set([registroId])));
+    }
+
+    /** Remove todos os registros do arquivo da Diretoria, com as mesmas garantias da exclusão individual. */
+    excluirHistoricoCompleto(): Resultado {
+        return this.aplicarExclusaoHistorico(excluirHistoricoCompleto);
+    }
+
+    /** Apaga do Work um arquivo de Macrodados, ou todos sem ID, com acontecimentos e sessões ligados a ele. */
+    excluirArquivoWork(arquivoId?: string): Resultado {
+        if (arquivoId && !this.estado.trabalhos.some((item) => item.arquivoId === arquivoId)) {
+            return falha('Arquivo não encontrado no Work.');
+        }
+        if (this.estado.trabalhos.some((item) => item.estado === 'trabalhando'
+            && (!arquivoId || item.arquivoId === arquivoId))) {
+            return falha('Interrompa o refinamento antes de excluir o arquivo.');
+        }
+        return this.aplicarExclusaoHistorico((estado) =>
+            excluirArquivosWork(estado, arquivoId ? new Set([arquivoId]) : undefined));
+    }
+
+    private aplicarExclusaoHistorico(excluir: (estado: EstadoSalvo) => EstadoSalvo): Resultado {
         if (this.estado.funcionarios.some((pessoa) =>
             ['trabalhando', 'bloqueado'].includes(this.expediente.statusDe(pessoa.id)))) {
             return falha('Aguarde ou interrompa os turnos em andamento antes de excluir registros.');
         }
         this.geral.renovarContexto();
         for (const pessoa of this.estado.funcionarios) this.expediente.interromper(pessoa.id);
-        const proximo = registro.categoria === 'conversas' && registro.funcionarioId
-            ? apagarConversaHistorica(this.estado, registro.funcionarioId)
-            : excluirRegistros(this.estado, new Set([registroId]));
-        this.atualizar(proximo);
+        this.expediente.limparContextoWork();
+        const anteriores = Object.keys(this.estado.conversas);
+        this.atualizar(excluir(this.estado));
         this.emitir({ tipo: 'geral', mensagens: this.estado.geral });
-        if (registro.funcionarioId) this.emitir({ tipo: 'conversa', funcionarioId: registro.funcionarioId,
-            mensagens: this.conversa(registro.funcionarioId) });
+        for (const funcionarioId of anteriores) this.emitir({ tipo: 'conversa', funcionarioId,
+            mensagens: this.conversa(funcionarioId) });
         return sucesso;
     }
 
@@ -953,7 +1046,7 @@ export class Escritorio {
             if (evento.trabalhoId === trabalho.id) return true;
             const arquivo = trabalho.arquivoId ? this.estado.refinamentos[trabalho.arquivoId] : undefined;
             return !!arquivo && evento.texto.startsWith(`A Diretoria entregou o arquivo ${arquivo.nome} `)
-                && evento.texto.includes(`Prazo: ${arquivo.prazo}.`);
+                && evento.texto.includes(`Prazo: ${formatarPrazo(arquivo)}.`);
         });
     }
 
@@ -1128,11 +1221,16 @@ export class Escritorio {
     private async fazerPausa(id: string, atividade: Atividade, minutos: number, origem: OrigemMcp): Promise<string> {
         if (!origemSocial(origem)) return this.simulacao.pedirPausa(id, atividade, minutos);
         const status = this.expediente.statusDe(id);
-        if (status === 'trabalhando' || status === 'bloqueado') {
+        if ((status === 'trabalhando' && !this.expediente.emConversa(id)) || status === 'bloqueado') {
             return 'Você está no meio de uma tarefa. Faça a pausa quando terminar, pelo próprio trabalho.';
         }
-        if (this.simulacao.emPausa(id)) return 'Você já está em pausa.';
-        const retorno = this.simulacao.pedirPausa(id, atividade, minutos);
+        if (this.simulacao.emPausaNoItem(id) || this.simulacao.ausenciaDe(id)) {
+            return 'Você já está em pausa.';
+        }
+        if (this.simulacao.emPausa(id) && !this.simulacao.parceiroEncontro(id)) {
+            return 'Você já está em pausa.';
+        }
+        const retorno = this.simulacao.pedirPausa(id, atividade, minutos, origem === 'reservado');
         if (!this.simulacao.emPausa(id)) return retorno;
         this.geral.pausaIniciada(id);
         void retorno;
@@ -1248,7 +1346,6 @@ export class Escritorio {
             `Colegas: ${colegas.join('; ') || 'nenhum'}.`,
             `Itens de pausa: ${this.itensDePausa() || 'nenhum. Peça à Diretoria para comprar.'}`,
             `Moedas do escritório: ${this.estado.moedas}.`,
-            this.descreverCota(),
             `Consertos pendentes: ${this.itensQuebrados() || 'nenhum'}.`,
             this.agenda.contextoTerminais(),
             'Trabalho do departamento: exclusivamente refinamento de Macrodados. Arquivos são iniciados pelo Work.',
@@ -1451,6 +1548,7 @@ export class Escritorio {
             orientacaoCarreira(id, this.estado.funcionarios, this.estado.carreira),
             this.social.contexto(id, 'social', consumir, ativos),
             `Trabalhos em andamento:\n${trabalhos.join('\n') || this.situacaoTrabalho()}`,
+            `${this.descreverCota()} Este número é o atual e prevalece sobre valores citados antes.`,
             ...(afastados.length ? [`Líderes afastados de você por transferência: ${afastados.join(', ')}.`] : []),
         ].join('\n\n');
     }

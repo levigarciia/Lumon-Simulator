@@ -37,6 +37,7 @@ export const rotulosStatus: Record<StatusFuncionario, string> = {
     bloqueado: 'Aguardando aprovação',
     erro: 'Serviço de IA indisponível',
     em_pausa: 'Em pausa',
+    conversando: 'Conversando',
 };
 
 export const coresStatus: Record<StatusFuncionario, string> = {
@@ -45,6 +46,7 @@ export const coresStatus: Record<StatusFuncionario, string> = {
     bloqueado: 'bg-[#f0b44c]',
     erro: 'bg-[#e0574f]',
     em_pausa: 'bg-[#6fa8dc]',
+    conversando: 'bg-[#6fa8dc]',
 };
 
 type Aba = 'ficha' | 'chat' | 'work';

@@ -22,6 +22,7 @@ export function Historico({ estado, aoFechar, executar }: {
     const [busca, setBusca] = useState('');
     const [escolhidaId, setEscolhidaId] = useState<string | null>(null);
     const [confirmando, setConfirmando] = useState(false);
+    const [confirmandoTudo, setConfirmandoTudo] = useState(false);
     const [excluindo, setExcluindo] = useState(false);
     const [limite, setLimite] = useState(80);
     const [erro, setErro] = useState('');
@@ -51,6 +52,17 @@ export function Historico({ estado, aoFechar, executar }: {
             }
         } finally { setExcluindo(false); }
     };
+    const excluirTudo = async () => {
+        if (!lumon || excluindo) return;
+        setExcluindo(true);
+        try {
+            if (await executar(lumon.excluirHistoricoCompleto())) {
+                setRegistros(await lumon.obterHistorico());
+                setEscolhidaId(null);
+                setConfirmandoTudo(false);
+            }
+        } finally { setExcluindo(false); }
+    };
     return <Janela titulo="Histórico" aoFechar={aoFechar} largura="w-[960px] max-w-[calc(100vw-24px)]">
         <div className="flex gap-3 border-b border-borda p-3">
             <select aria-label="Categoria do histórico" value={categoria} onChange={(evento) => {
@@ -63,7 +75,21 @@ export function Historico({ estado, aoFechar, executar }: {
             <input aria-label="Pesquisar histórico" placeholder="Pesquisar" value={busca} onChange={(evento) => {
                 setBusca(evento.target.value); setConfirmando(false); setLimite(80);
             }} className="min-w-0 flex-1 rounded-md border border-borda bg-fundo px-3 text-[12px] text-principal" />
+            <button disabled={excluindo || !registros.length} onClick={() => setConfirmandoTudo(true)}
+                className="shrink-0 px-2 text-[12px] text-secundario hover:text-red-300 disabled:opacity-40">
+                Limpar tudo
+            </button>
         </div>
+        {confirmandoTudo && <div className="flex flex-wrap items-center gap-3 border-b border-borda p-3 text-[12px]">
+            <span className="text-secundario">
+                Excluir definitivamente todos os {registros.length} registros, conversas e cópias?
+            </span>
+            <button disabled={excluindo} onClick={() => void excluirTudo()} className="text-red-300 disabled:opacity-50">
+                {excluindo ? 'Excluindo' : 'Excluir tudo'}
+            </button>
+            <button disabled={excluindo} onClick={() => setConfirmandoTudo(false)}
+                className="text-secundario">Cancelar</button>
+        </div>}
         {erro ? <p className="p-5 text-[13px] text-secundario">{erro}</p>
             : <div className="grid h-[64vh] grid-cols-[minmax(180px,30%)_minmax(0,1fr)]">
                 <div className="overflow-y-auto border-r border-borda">

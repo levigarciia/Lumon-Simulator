@@ -7,7 +7,9 @@ import { esquemaEstado, type EstadoSalvo } from '../../shared/estado';
 const dominios = {
     escritorio: esquemaEstado.pick({ versao: true, moedas: true, sala: true, necessidadesLiberadas: true }),
     equipe: esquemaEstado.pick({ funcionarios: true, demissoes: true, carreira: true }),
-    simulacao: esquemaEstado.pick({ relogio: true, diaNecessidades: true, necessidades: true, ausencias: true }),
+    simulacao: esquemaEstado.pick({
+        relogio: true, diaNecessidades: true, necessidades: true, pausas: true, ausencias: true,
+    }),
     conversas: esquemaEstado.pick({ conversas: true, geral: true, threads: true, leiturasGeral: true, naoLidas: true }),
     social: esquemaEstado.pick({ social: true, pensamentos: true, historicoPensamentos: true }),
     trabalho: esquemaEstado.pick({ projetos: true, trabalhos: true, refinamentos: true, cota: true }),

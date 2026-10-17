@@ -144,7 +144,8 @@ test('aviso inclui pensamento e relações do autor com nomes distintos dos demi
         expect(prompt).toContain('Aviso periódico:');
         expect(prompt).toContain(estado.pensamentos[ana.id]!.texto);
         expect(prompt).not.toContain(estado.pensamentos[bia.id]!.texto);
-        expect(prompt).toContain(`Bia [${bia.id}]: confiança 76`);
+        expect(prompt).toContain(`Bia [${bia.id}]: confia,`);
+        expect(prompt).not.toContain('Assunto sugerido');
         expect(prompt).toContain(`Caio (demitido) [${caio.id}]`);
         expect(prompt).toContain(`Davi (demitido) [${davi.id}]`);
         expect(prompt).not.toContain('confiança 19');

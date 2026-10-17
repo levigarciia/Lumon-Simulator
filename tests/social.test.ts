@@ -239,10 +239,12 @@ describe('percepção e relações', () => {
         expect(caso.social.interagir('inexistente', helena.id, 'reservado', 'Oi', 'publico', []))
             .toContain('não encontrado');
         for (let indice = 0; indice < 8; indice++) {
-            caso.social.interagir(pedro.id, helena.id, 'reservado', 'Conversa', 'reservado', []);
+            caso.social.interagir(pedro.id, helena.id, 'reservado', `Conversa ${indice}`, 'reservado', []);
         }
-        expect(caso.social.interagir(pedro.id, helena.id, 'reservado', 'Conversa', 'reservado', []))
+        expect(caso.social.interagir(pedro.id, helena.id, 'reservado', 'Conversa nova', 'reservado', []))
             .toContain('Aguarde um minuto');
+        expect(caso.social.interagir(pedro.id, lia.id, 'reservado', 'Oi!', 'reservado', []))
+            .toContain('acabou de dizer isso');
     });
 
     test('crítica pode gerar ressentimento e depois respeito por interpretação própria', () => {
@@ -278,7 +280,8 @@ describe('percepção e relações', () => {
         expect(retorno).toContain(`ressentimento de 100 para ${atual.ressentimento}`);
         for (const canal of ['social', 'chat', 'trabalho'] as const) {
             const contexto = caso.social.contexto(pedro.id, canal, false, undefined, canal === 'social');
-            expect(contexto).toContain(`ressentimento ${atual.ressentimento}`);
+            expect(contexto).toContain('guarda mágoa');
+            expect(contexto).not.toContain(`ressentimento ${atual.ressentimento}`);
             expect(contexto).toContain('Mágoa intensa');
             expect(contexto).toContain('Concordar num ponto não é perdoar');
         }
@@ -428,6 +431,64 @@ test('encontro caminha, aguarda chegada e devolve o funcionário à mesa depois 
         expect(simulacao.emPausa(helena.id)).toBe(false);
         expect(simulacao.agentes().find((item) => item.id === helena.id)?.atividade).toBe('trabalhando');
     } finally { simulacao.encerrar(); }
+});
+
+test('encontro social aparece como conversa, não como pausa', async () => {
+    const instancia = escritorio();
+    try {
+        const encontro = instancia['simulacao'].encontrarColega(helena.id, pedro.id);
+        for (let indice = 0; indice < 150; indice++) instancia['simulacao'].avancar(0.1);
+        await encontro;
+        expect(instancia.publico().status[helena.id]).toBe('conversando');
+
+        instancia['simulacao'].cancelarEncontro(helena.id);
+        expect(instancia['simulacao'].parceiroEncontro(helena.id)).toBeUndefined();
+        expect(instancia['simulacao'].emPausa(helena.id)).toBe(false);
+        expect(instancia.publico().status[helena.id]).not.toBe('em_pausa');
+    } finally { instancia.encerrar(); }
+});
+
+test('funcionário pode trocar o encontro por uma pausa real', async () => {
+    const instancia = escritorio();
+    const simulacao = instancia['simulacao'];
+    let reiniciada: Escritorio | undefined;
+    if (simulacao['temporizador']) clearInterval(simulacao['temporizador']);
+    simulacao['temporizador'] = null;
+    instancia['estado'].sala = { ...instancia['estado'].sala, itens: [
+        ...instancia['estado'].sala.itens,
+        { id: 'maquina', tipo: 'maquina_guloseimas', celula: { x: 12, z: 0 }, rotacao: 0 },
+    ] };
+    try {
+        const encontro = simulacao.encontrarColega(helena.id, pedro.id);
+        for (let indice = 0; indice < 150; indice++) simulacao.avancar(0.1);
+        await encontro;
+        expect(simulacao.parceiroEncontro(helena.id)).toBe(pedro.id);
+
+        expect(await instancia['fazerPausa'](helena.id, 'comendo', 1, 'reservado'))
+            .toContain('Pausa iniciada');
+        expect(simulacao.parceiroEncontro(helena.id)).toBeUndefined();
+        for (let indice = 0; indice < 500 && simulacao.agentes().find((agente) =>
+            agente.id === helena.id)?.atividade !== 'comendo'; indice++) simulacao.avancar(0.1);
+        expect(simulacao.agentes().find((agente) => agente.id === helena.id)?.atividade).toBe('comendo');
+        expect(simulacao.emPausaNoItem(helena.id)).toBe(true);
+        expect(instancia.publico().status[helena.id]).toBe('em_pausa');
+        expect(instancia['estado'].pausas[helena.id]?.itemId).toBe('maquina');
+        const salvo = structuredClone(instancia['estado']);
+        instancia.encerrar();
+
+        reiniciada = new Escritorio(salvo, () => {}, () => {}, 'C:/temporario');
+        const simulacaoRestaurada = reiniciada['simulacao'];
+        if (simulacaoRestaurada['temporizador']) clearInterval(simulacaoRestaurada['temporizador']);
+        simulacaoRestaurada['temporizador'] = null;
+        expect(reiniciada.publico().status[helena.id]).toBe('em_pausa');
+        expect(simulacaoRestaurada.agentes().find((agente) => agente.id === helena.id)?.atividade)
+            .toBe('comendo');
+        expect(simulacaoRestaurada.agentes().find((agente) => agente.id === helena.id)?.destinoId)
+            .toBe('maquina');
+    } finally {
+        instancia.encerrar();
+        reiniciada?.encerrar();
+    }
 });
 
 test('chat individual responde no mesmo turno sem exigir uma ação artificial', async () => {
@@ -833,9 +894,9 @@ test('MCP identifica a autoria social e não expõe ações do jogador aos agent
         expect(fonteInvalida.isError).toBe(true);
         expect(JSON.stringify(fonteInvalida)).toContain('nunca IDs de funcionários');
         const nomeInvalido = await cliente.callTool({ name: 'interagir_socialmente',
-            arguments: { ...argumentos, funcionario: helena.nome } });
+            arguments: { ...argumentos, funcionario: 'Ninguém' } });
         expect(nomeInvalido.isError).toBe(true);
-        expect(JSON.stringify(nomeInvalido)).toContain('não o nome');
+        expect(JSON.stringify(nomeInvalido)).toContain('nome completo ou o ID');
         expect(instancia.publico().social.eventos.some((item) => item.tipo === 'cobrar')).toBe(false);
         const fonte = instancia['social'].registrar({ tipo: 'fala', autorId: helena.id, texto: 'Vamos melhorar.',
             alcance: 'publico', ouvintes: [], fontes: [] }, false);
@@ -912,7 +973,7 @@ test('líder no Geral executa repreensão pública no turno de reação com font
         await estabilizar();
         expect(turnosLider).toBe(1);
         expect(instancia.publico().social.eventos.filter((item) => item.tipo === 'cobrar')).toHaveLength(1);
-        expect(instrucoes).toContain('Para agir sobre um colega, use interagir_socialmente');
+        expect(instrucoes).toContain('cobrar alguém, use interagir_socialmente');
         expect(instrucoes).not.toContain('suas outras ferramentas são privados');
         expect(contexto).toStartWith('Turno de');
         expect(contexto).toContain(fonte.id);
@@ -943,7 +1004,7 @@ test('refinador pode contestar publicamente na reação e o colega recebe o acon
         enviar: async (prompt, ouvinte, _sinal, opcoes) => {
             if (pessoa.id === helena.id && !respondeu && prompt.includes('não concordo com essa generalização')) {
                 respondeu = true;
-                ouvinte.texto('Pedro, vou ser mais específica na próxima cobrança.');
+                ouvinte.texto('Vou ser mais específica na próxima cobrança, Pedro.');
                 return;
             }
             if (pessoa.id !== pedro.id) return;
@@ -979,7 +1040,7 @@ test('refinador pode contestar publicamente na reação e o colega recebe o acon
         expect(instancia.mensagensGeral().some((fala) => fala.texto === 'Não repita minha contestação.')).toBe(false);
         expect(respondeu).toBe(true);
         expect(instancia.mensagensGeral().some((fala) => fala.autorId === helena.id
-            && fala.texto === 'Pedro, vou ser mais específica na próxima cobrança.')).toBe(true);
+            && fala.texto === 'Vou ser mais específica na próxima cobrança, Pedro.')).toBe(true);
         expect(turnosPedro).toBe(1);
     } finally { await cliente.close(); instancia.encerrar(); }
 });

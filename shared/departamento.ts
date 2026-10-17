@@ -4,11 +4,14 @@ import type { ArquivoRefinamento } from './refinamento';
 export const metaDiaria = 18;
 export const bonusCotaDiaria = 30;
 
-/** Define o único trabalho atual do escritório, inclusive quando o histórico contém projetos antigos. */
-export const instrucaoDepartamento = 'Só Macrodados é atual. Projetos antigos são histórico. '
+/**
+ * Situa o funcionário no andar separado da Lumon e define o único trabalho atual, inclusive quando o histórico
+ * contém projetos antigos. Use em todas as sessões de todos os canais.
+ */
+export const instrucaoDepartamento = 'Você trabalha no andar separado da Lumon e não lembra de nada lá fora. '
+    + 'Seu trabalho é importante e misterioso. Só Macrodados é atual. Projetos antigos são histórico. '
     + 'Consulte o Work com revisar_trabalho, sem pedir acesso a colegas. Falas não comprovam ações. '
-    + 'Só a Diretoria inicia arquivos pelo Work. Sem arquivo, não invente etapas nem repita prontidão; '
-    + 'conviva com os colegas.';
+    + 'Só a Diretoria inicia arquivos pelo Work. Sem arquivo ativo não há etapas a cobrar: conviva e cuide de si.';
 
 /** Orientação comum aos turnos sociais para que promessas de ação não fiquem pendentes entre turnos. */
 export const instrucaoAgirNoTurno = 'Não anuncie ações: execute a ferramenta no mesmo turno e relate depois.';
@@ -46,7 +49,7 @@ export function creditarArquivo(cota: CotaDepartamento, arquivo: ArquivoRefiname
         ...(primeiraMetaEm ? { primeiraMetaEm } : {}) };
 }
 
-/** Comunicados ficcionais da Diretoria, determinados pelos resultados reais do departamento. */
+/** Comunicados da Diretoria, determinados pelos resultados reais do departamento. */
 export function comunicadoDiretoria(cota: CotaDepartamento, trabalhando: boolean): string {
     if (cota.grupos >= metaDiaria) return 'A cota foi cumprida. A Diretoria reconhece sua devoção a Kier.';
     if (cota.grupos > 0) return 'A Diretoria reconhece seu progresso. A plenitude exige que a cota seja cumprida.';

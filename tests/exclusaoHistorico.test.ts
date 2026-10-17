@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { apagarConversaHistorica, excluirRegistros, listarHistorico } from '../electron/services/historico';
+import { apagarConversaHistorica, excluirArquivosWork, excluirHistoricoCompleto, excluirRegistros, listarHistorico } from '../electron/services/historico';
 import { Persistencia } from '../electron/services/persistencia';
 import { esquemaEstado, estadoInicial } from '../shared/estado';
 import type { EventoSocial } from '../shared/social';
@@ -55,6 +55,46 @@ test('exclusão remove cópias, fontes derivadas e evidências preservando a dem
     expect(estado.conversas[id]).toHaveLength(1);
     const semDemissao = excluirRegistros(apagado, new Set([apagado.demissoes[0]!.id]));
     expect(semDemissao.demissoes).toEqual([]);
+});
+
+test('limpar todo o histórico apaga de fato registros, conversas, pensamentos e cópias', () => {
+    const { estado, id, texto } = preparar();
+    estado.pensamentos[id] = { id: randomUUID(), texto: 'Pensamento privado que também deve sumir.', atualizadoEm: '' };
+    const apagado = excluirHistoricoCompleto(estado);
+    expect(listarHistorico(apagado)).toEqual([]);
+    expect(apagado.demissoes).toEqual([]);
+    expect(apagado.social.eventos).toEqual([]);
+    expect(apagado.social.historico).toEqual([]);
+    expect(apagado.social.lembrancas).toEqual([]);
+    expect(JSON.stringify(apagado)).not.toContain(texto);
+    expect(JSON.stringify(apagado)).not.toContain('Pensamento privado que também deve sumir.');
+    expect(esquemaEstado.safeParse(apagado).success).toBe(true);
+});
+
+test('excluir um arquivo do Work apaga trabalhos, grade, mensagens e acontecimentos só daquele arquivo', () => {
+    const { estado, id } = preparar();
+    const trabalho = (arquivoId: string, criadoEm: string) => ({ id: randomUUID(), pedidoId: randomUUID(),
+        funcionarioId: id, nome: 'Gepeto', projetoId: 'macrodados', tarefa: 'Refine.', resultado: '',
+        estado: 'concluido' as const, criadoEm, arquivoId, avaliacao: { estado: 'pendente' as const, recompensa: 0 } });
+    const primeiro = trabalho('arquivo_a', '2026-10-17T10:00:00.000Z');
+    const segundo = trabalho('arquivo_b', '2026-10-17T11:00:00.000Z');
+    estado.trabalhos = [primeiro, segundo];
+    const mensagem = (texto: string, criadaEm: string) => ({ id: randomUUID(), autor: 'funcionario' as const,
+        texto, criadaEm, ferramentas: [], canal: 'work' as const, projetoId: 'macrodados' });
+    estado.conversas[id]!.push(mensagem('Grade do primeiro arquivo.', '2026-10-17T10:05:00.000Z'),
+        mensagem('Grade do segundo arquivo.', '2026-10-17T11:05:00.000Z'));
+    const evento: EventoSocial = { id: randomUUID(), tipo: 'comunicado', sequencia: 3, autorId: 'diretoria',
+        texto: 'Etapa do primeiro arquivo.', criadoEm: '', alcance: 'publico', ouvintes: [], fontes: [],
+        trabalhoId: primeiro.id };
+    estado.social.eventos.push(evento);
+    estado.social.lembrancas.push(evento);
+    const apagado = excluirArquivosWork(estado, new Set(['arquivo_a']));
+    expect(apagado.trabalhos.map((item) => item.arquivoId)).toEqual(['arquivo_b']);
+    expect(JSON.stringify(apagado)).not.toContain('Grade do primeiro arquivo.');
+    expect(JSON.stringify(apagado)).not.toContain('Etapa do primeiro arquivo.');
+    expect(JSON.stringify(apagado)).toContain('Grade do segundo arquivo.');
+    expect(apagado.conversas[id]!.some((item) => item.canal !== 'work')).toBe(true);
+    expect(excluirArquivosWork(apagado).trabalhos).toEqual([]);
 });
 
 test('exclusão definitiva elimina os domínios antigos que ainda continham o diálogo', async () => {

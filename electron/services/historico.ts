@@ -103,6 +103,53 @@ export function excluirRegistros(estado: EstadoSalvo, ids: Set<string>): EstadoS
     } };
 }
 
+/**
+ * Apaga arquivos de Macrodados do Work: trabalhos, grade e mensagens das sessões. Sem IDs, apaga todos.
+ * As mensagens não guardam o trabalho, então cada arquivo ocupa o intervalo entre seu início e o do próximo,
+ * o que é exato porque só um arquivo é refinado por vez. A cota do dia não muda.
+ */
+export function excluirArquivosWork(estado: EstadoSalvo, arquivoIds?: ReadonlySet<string>): EstadoSalvo {
+    const inicios = new Map<string, number>();
+    for (const trabalho of estado.trabalhos) {
+        if (!trabalho.arquivoId) continue;
+        const inicio = Date.parse(trabalho.criadoEm);
+        inicios.set(trabalho.arquivoId, Math.min(inicios.get(trabalho.arquivoId) ?? inicio, inicio));
+    }
+    const ordem = [...inicios].sort((a, b) => a[1] - b[1]);
+    const removidos = new Set(ordem.map(([id]) => id).filter((id) => !arquivoIds || arquivoIds.has(id)));
+    const janelas = ordem.flatMap(([id, inicio], indice) => removidos.has(id)
+        ? [[inicio, ordem[indice + 1]?.[1] ?? Infinity] as const] : []);
+    const projetos = new Set(estado.trabalhos.filter((item) => removidos.has(item.arquivoId ?? ''))
+        .map((item) => item.projetoId));
+    const daJanela = (mensagem: Mensagem) => {
+        const data = Date.parse(mensagem.criadaEm);
+        return janelas.some(([inicio, fim]) => data >= inicio && data < fim);
+    };
+    const trabalhos = new Set(estado.trabalhos.filter((item) => removidos.has(item.arquivoId ?? ''))
+        .map((item) => item.id));
+    const nomes = [...removidos].flatMap((id) => estado.refinamentos[id]
+        ? [`arquivo ${estado.refinamentos[id]!.nome}`] : []);
+    const eventos = new Set(acontecimentos(estado).filter((evento) => trabalhos.has(evento.trabalhoId ?? '')
+        || nomes.some((nome) => evento.texto.includes(nome))).map((evento) => evento.id));
+    const semEventos = excluirRegistros(estado, eventos);
+    return { ...semEventos,
+        trabalhos: estado.trabalhos.filter((item) => !removidos.has(item.arquivoId ?? '')),
+        refinamentos: Object.fromEntries(Object.entries(estado.refinamentos).filter(([id]) => !removidos.has(id))),
+        conversas: Object.fromEntries(Object.entries(semEventos.conversas).map(([id, mensagens]) => [id,
+            mensagens.filter((mensagem) => mensagem.canal !== 'work' || !projetos.has(mensagem.projetoId ?? '')
+                || !daJanela(mensagem))])) };
+}
+
+/** Apaga todos os registros listados à Diretoria, incluindo os diálogos individuais, o Work e suas cópias. */
+export function excluirHistoricoCompleto(estado: EstadoSalvo): EstadoSalvo {
+    const conversas = listarHistorico(estado).filter((registro) => registro.categoria === 'conversas');
+    const semConversas = conversas.reduce((atual, registro) =>
+        apagarConversaHistorica(atual, registro.funcionarioId!), estado);
+    const semRegistros = excluirRegistros(semConversas,
+        new Set(listarHistorico(semConversas).map((registro) => registro.id)));
+    return excluirArquivosWork(semRegistros);
+}
+
 /** Apaga um diálogo individual e suas fontes, incluindo cópias arquivadas e pensamentos registrados nele. */
 export function apagarConversaHistorica(estado: EstadoSalvo, funcionarioId: string): EstadoSalvo {
     const mensagens = (estado.conversas[funcionarioId] ?? []).filter((mensagem) => mensagem.canal !== 'work');

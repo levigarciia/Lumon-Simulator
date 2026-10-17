@@ -96,3 +96,15 @@ test('captura o estado ao agendar a gravação', async () => {
     await persistencia.descarregar();
     expect((await persistencia.carregar()).moedas).toBe(600);
 });
+
+test('pausas ativas são mantidas no domínio de simulação ao salvar e carregar', async () => {
+    const { persistencia } = await preparar();
+    const pausa = {
+        id: 'pausa-1', iniciadaEm: new Date().toISOString(), itemId: 'maquina',
+        indiceUso: 0, atividade: 'comendo' as const, origem: 'ferramenta' as const,
+        segundos: 300, terminaEm: Date.now() + 300000, atualizadoEm: Date.now(), limite: 40,
+    };
+    persistencia.salvar({ ...estadoInicial(), pausas: { funcionario: pausa } });
+    await persistencia.descarregar();
+    expect((await persistencia.carregar()).pausas).toEqual({ funcionario: pausa });
+});

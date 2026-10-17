@@ -118,7 +118,7 @@ export function criarSessaoLocal(
                     somenteAcao: opcoes.exigirFerramenta,
                     mensagens, ferramentas: lista, publicar: (texto) => ouvinte.texto(texto),
                     executar: (chamada) => chamar(chamada, lista, ouvinte, combinado),
-                    inferir: (formato) => motor.usar(configuracao.modelo, combinado, async (ativo) => {
+                    inferir: (somenteAcao) => motor.usar(configuracao.modelo, combinado, async (ativo) => {
                         combinado.throwIfAborted();
                         ouvinte.etapa?.('processando');
                         const contexto = ativo.estado.contexto ?? 4096;
@@ -130,9 +130,10 @@ export function criarSessaoLocal(
                             const resposta = await lerRespostaLocal(await ativo.completar({
                                 messages: mensagens, stream: true, cache_prompt: true, temperature: 0.3,
                                 max_tokens: Math.min(limite, disponivel),
-                                chat_template_kwargs: { enable_thinking: false }, response_format: formato,
+                                chat_template_kwargs: { enable_thinking: false },
+                                ...(lista.length ? { tools: lista, tool_choice: somenteAcao ? 'required' : 'auto' } : {}),
                             }, combinado), combinado, () => {});
-                            if (resposta.motivo !== 'length') return resposta.texto;
+                            if (resposta.motivo !== 'length') return resposta;
                         }
                         throw new Error('A decisão social foi truncada após o limite de tentativas.');
                     }, contextoMinimoLocal(mensagens, lista)),

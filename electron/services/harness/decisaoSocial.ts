@@ -1,52 +1,39 @@
 import { z } from 'zod';
 import type { MensagemLocal } from './contextoLocal';
-import type { ChamadaLocal } from './respostaLocal';
+import type { ChamadaLocal, RespostaLocal } from './respostaLocal';
 
 export type FerramentaDecisao = {
     function: { name: string; description?: string; parameters: unknown };
 };
 
-const esquemaDecisao = z.discriminatedUnion('tipo', [
-    z.object({ tipo: z.literal('fala'), texto: z.string().trim().min(1) }).strict(),
-    z.object({ tipo: z.literal('silencio') }).strict(),
-    z.object({ tipo: z.literal('acao'), ferramenta: z.string(), argumentos: z.record(z.string(), z.unknown()) }).strict(),
-]);
+export const instrucaoDecisaoSocial = 'Em cada turno, responda ao que foi dito ou use uma ferramenta disponível '
+    + 'quando precisar consultar ou agir. Use as ferramentas pelo protocolo de chamadas, com argumentos que '
+    + 'correspondam ao schema fornecido. Responda diretamente, sem repetir ou copiar as perguntas e falas anteriores. '
+    + 'Não anuncie uma ação antes de executá-la. Depois de consultar, use o resultado recebido para decidir o próximo '
+    + 'passo ou responder. Se não houver nada útil a fazer ou dizer, responda brevemente sem inventar ações ou resultados.';
 
-export const instrucaoDecisaoSocial = 'Nos turnos de conversa, decida pelo JSON exigido: fala, acao ou silencio. '
-    + 'Para pausar ou executar qualquer ação, escolha acao com a ferramenta e argumentos reais, sem fala. '
-    + 'A execução devolve o resultado antes de você decidir novamente. Fala serve apenas para conversar ou '
-    + 'relatar resultados confirmados; não anuncie ações nem deduza sucesso de falas anteriores. '
-    + 'Sem algo útil a dizer ou fazer, escolha silencio.';
+const instrucaoDecisaoTurno = 'As falas transcritas acima pertencem a outras pessoas. Responda com suas próprias '
+    + 'palavras, sem reproduzir frases delas nem as suas anteriores, ou aja por uma ferramenta quando um ato, '
+    + 'como cobrar, elogiar, contestar, propor uma demissão ou fazer uma pausa, disser mais do que uma fala. '
+    + 'Ameaçar ou prometer uma ação em texto não a executa.';
 
-const instrucaoDecisaoReacao = 'Neste turno de reação, escolha somente acao pelo JSON exigido, com ferramenta '
-    + 'e argumentos reais. Texto livre não é publicado; interagir_socialmente pode tornar sua reação pública. '
-    + 'Fazer pausa passa a vez e encerra este turno após o uso do objeto.';
-
-/** Restringe a decisão social às falas, ao silêncio e às ferramentas autorizadas no turno. */
-export function formatoDecisaoSocial(ferramentas: readonly FerramentaDecisao[], somenteAcao = false) {
-    return { type: 'json_schema', json_schema: { name: 'decisao_social', strict: true, schema: {
-        anyOf: [
-            ...(!somenteAcao ? [
-                { type: 'object', properties: { tipo: { const: 'fala' }, texto: { type: 'string', minLength: 1 } },
-                    required: ['tipo', 'texto'], additionalProperties: false },
-                { type: 'object', properties: { tipo: { const: 'silencio' } },
-                    required: ['tipo'], additionalProperties: false },
-            ] : []),
-            ...ferramentas.map(({ function: ferramenta }) => ({
-                type: 'object', description: ferramenta.description,
-                properties: { tipo: { const: 'acao' }, ferramenta: { const: ferramenta.name },
-                    argumentos: ferramenta.parameters },
-                required: ['tipo', 'ferramenta', 'argumentos'], additionalProperties: false,
-            })),
-        ],
-    } } };
+function anexarAoPedido(mensagens: MensagemLocal[], instrucao: string): void {
+    const ultima = mensagens.at(-1);
+    if (ultima?.role === 'user' && typeof ultima.content === 'string') {
+        ultima.content = `${ultima.content}\n\n${instrucao}`;
+        return;
+    }
+    mensagens.push({ role: 'user', content: instrucao });
 }
 
-/** Executa decisões estruturadas sem converter promessas em ações nem publicar JSON como fala. */
+const instrucaoDecisaoReacao ='Neste turno, use uma ferramenta disponível para registrar uma reação real. '
+    + 'Não responda com texto: selecione uma chamada de ferramenta com argumentos válidos.';
+
+/** Executa chamadas nativas do modelo sem converter as definições das ferramentas em gramática JSON. */
 export async function executarDecisoesSociais(opcoes: {
     mensagens: MensagemLocal[];
     ferramentas: readonly FerramentaDecisao[];
-    inferir: (formato: ReturnType<typeof formatoDecisaoSocial>) => Promise<string>;
+    inferir: (somenteAcao: boolean) => Promise<RespostaLocal>;
     executar: (chamada: ChamadaLocal) => Promise<{ saida: string; erro: boolean; terminal?: boolean }>;
     publicar: (texto: string) => void;
     somenteAcao?: boolean;
@@ -54,49 +41,56 @@ export async function executarDecisoesSociais(opcoes: {
     if (opcoes.somenteAcao && !opcoes.ferramentas.length) {
         throw new Error('O turno de reação exige uma ferramenta disponível.');
     }
-    const formato = formatoDecisaoSocial(opcoes.ferramentas, opcoes.somenteAcao);
-    const instrucao = opcoes.somenteAcao ? instrucaoDecisaoReacao : instrucaoDecisaoSocial;
-    opcoes.mensagens.push({ role: 'user', content: instrucao + '\nFerramentas autorizadas:\n'
-        + JSON.stringify(opcoes.ferramentas.map((item) => item.function)) });
+    anexarAoPedido(opcoes.mensagens, opcoes.somenteAcao ? instrucaoDecisaoReacao : instrucaoDecisaoTurno);
     const falhas = new Map<string, number>();
     const limiteRodadas = 12;
     for (let rodada = 0; rodada < limiteRodadas; rodada++) {
-        const bruto = await opcoes.inferir(formato);
-        let decisao: z.infer<typeof esquemaDecisao>;
-        try { decisao = esquemaDecisao.parse(JSON.parse(bruto)); }
-        catch { throw new Error('O agente não retornou uma decisão social válida. Nenhuma fala foi publicada.'); }
-        if (opcoes.somenteAcao && decisao.tipo !== 'acao') {
-            throw new Error('O turno de reação exige uma ação real. Nenhuma fala foi publicada.');
-        }
-        opcoes.mensagens.push({ role: 'assistant', content: JSON.stringify(decisao) });
-        if (decisao.tipo === 'silencio') return;
-        if (decisao.tipo === 'fala') {
-            opcoes.publicar(decisao.texto);
+        const resposta = await opcoes.inferir(!!opcoes.somenteAcao);
+        if (!resposta.chamadas.length) {
+            if (opcoes.somenteAcao) {
+                throw new Error('O turno de reação exige uma ação real. Nenhuma fala foi publicada.');
+            }
+            if (!resposta.texto.trim()) {
+                throw new Error('O agente não retornou texto nem chamada de ferramenta.');
+            }
+            opcoes.mensagens.push({ role: 'assistant', content: resposta.texto.trim() });
+            opcoes.publicar(resposta.texto.trim());
             return;
         }
-        if (!opcoes.ferramentas.some((item) => item.function.name === decisao.ferramenta)) {
-            throw new Error('A decisão social escolheu uma ferramenta não autorizada.');
+
+        const argumentosPorChamada = new Map<ChamadaLocal, Record<string, unknown>>();
+        for (const chamada of resposta.chamadas) {
+            if (!opcoes.ferramentas.some((item) => item.function.name === chamada.function.name)) {
+                throw new Error('A decisão social escolheu uma ferramenta não autorizada.');
+            }
+            const argumentos = z.record(z.string(), z.unknown()).parse(JSON.parse(chamada.function.arguments || '{}'));
+            chamada.function.arguments = JSON.stringify(argumentos);
+            argumentosPorChamada.set(chamada, argumentos);
         }
-        const resultado = await opcoes.executar({ id: `decisao_${rodada}`, type: 'function', function: {
-            name: decisao.ferramenta, arguments: JSON.stringify(decisao.argumentos),
-        } });
-        opcoes.mensagens.push({ role: 'user', content: JSON.stringify({
-            resultado_da_acao: decisao.ferramenta, erro: resultado.erro, retorno: resultado.saida,
-        }) });
-        if (!resultado.erro && decisao.ferramenta === 'fazer_pausa') return;
-        if (!resultado.erro && (resultado.terminal || decisao.ferramenta === 'silencio')) return;
-        if (!resultado.erro && opcoes.somenteAcao
-            && !['ver_escritorio', 'consultar_acontecimento', 'consultar', 'revisar_trabalho', 'fazer_pausa',
-                'reagir_ao_acontecimento'].includes(decisao.ferramenta)) return;
-        if (!resultado.erro && opcoes.somenteAcao && decisao.ferramenta === 'reagir_ao_acontecimento') {
-            opcoes.mensagens.push({ role: 'user', content: 'Sua interpretação foi salva. Se isso merece uma resposta '
-                + 'ao colega, use interagir_socialmente com alcance publico e a fonte conhecida. '
-                + 'Se preferir não comunicar, use nenhuma_acao. Não repita a interpretação.' });
+        opcoes.mensagens.push({ role: 'assistant', content: resposta.texto || null, tool_calls: resposta.chamadas });
+
+        for (const chamada of resposta.chamadas) {
+            const nome = chamada.function.name;
+            const resultado = await opcoes.executar(chamada);
+            opcoes.mensagens.push({ role: 'tool', tool_call_id: chamada.id,
+                content: `${resultado.erro ? 'Erro' : 'Resultado'} da ferramenta ${nome}:\n${resultado.saida}` });
+            if (!resultado.erro && (nome === 'fazer_pausa' || resultado.terminal || nome === 'silencio')) return;
+            if (!resultado.erro && opcoes.somenteAcao
+                && !['ver_escritorio', 'consultar_acontecimento', 'consultar', 'revisar_trabalho',
+                    'reagir_ao_acontecimento'].includes(nome)) return;
+            if (!resultado.erro && opcoes.somenteAcao && nome === 'reagir_ao_acontecimento') {
+                const podeOmitir = opcoes.ferramentas.some((item) => item.function.name === 'nenhuma_acao');
+                opcoes.mensagens.push({ role: 'user', content: 'Sua interpretação foi salva. Se isso merece uma resposta '
+                    + 'ao colega, use interagir_socialmente com alcance publico e a fonte conhecida. '
+                    + (podeOmitir ? 'Se preferir não comunicar, use nenhuma_acao. '
+                        : 'Se preferir não comunicar em público, use atualizar_pensamento. ')
+                    + 'Não repita a interpretação.' });
+            }
+            const chave = JSON.stringify({ nome, argumentos: argumentosPorChamada.get(chamada) });
+            const quantidade = resultado.erro ? (falhas.get(chave) ?? 0) + 1 : 0;
+            falhas.set(chave, quantidade);
+            if (quantidade >= 3) throw new Error('O agente repetiu a mesma ação inválida três vezes.');
         }
-        const chave = JSON.stringify(decisao);
-        const quantidade = resultado.erro ? (falhas.get(chave) ?? 0) + 1 : 0;
-        falhas.set(chave, quantidade);
-        if (quantidade >= 3) throw new Error('O agente repetiu a mesma ação inválida três vezes.');
     }
     throw new Error('O agente atingiu o limite de decisões sociais deste turno.');
 }

@@ -24,6 +24,7 @@ function rotuloNaSala(id: string, estado: EstadoPublico): string | undefined {
     if (ausencia?.retornando) return 'Voltando à mesa';
     if (ausencia?.duracao !== undefined) return ausencia.motivo === 'folga' ? 'Saindo de folga' : 'Indo ao anexo';
     if (ausencia) return nomesAusencia[ausencia.motivo];
+    if (estado.status[id] === 'conversando') return 'Conversando';
     if (estado.status[id] === 'em_pausa') return 'Em pausa';
     const trabalho = atividadeDepartamento(id, estado.trabalhos);
     if (trabalho) return trabalho;

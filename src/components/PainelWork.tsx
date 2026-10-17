@@ -5,7 +5,7 @@ import type { Resultado } from '../../shared/ponte';
 import { threadPrincipal } from '../../shared/threads';
 import type { RegistroTrabalho } from '../../shared/trabalho';
 import { lumon } from '../services/ponte';
-import { HistoricoWork } from './conversa/HistoricoWork';
+import { HistoricoArquivos } from './refinamento/HistoricoArquivos';
 import { Aprovacoes } from './PainelFuncionario';
 import { Botao, classeEntrada } from './ui';
 import { cotaAtual, prepararTerminal, type CotaDepartamento } from '../../shared/departamento';
@@ -94,8 +94,8 @@ export function PainelWork({ funcionarios, trabalhos, aprovacoes, executar, refi
             <DoutrinaDepartamento cota={cotaDoDia} trabalhando={ocupado} />
             {simulacoes.some((item) => item.avaliacao?.estado === 'aguardando_aprovacao') && <Botao
                 onClick={() => setAba('historico')}>Avaliar entrega no histórico</Botao>}
-        </div> : <HistoricoWork trabalhos={simulacoes} funcionarios={funcionarios} executar={executar}
-            mensagemVazia="Escolha a duração e inicie um arquivo para a equipe refinar." />}
+        </div> : <HistoricoArquivos trabalhos={simulacoes} refinamentos={refinamentos}
+            funcionarios={funcionarios} executar={executar} />}
         <Aprovacoes aprovacoes={aprovacoes.filter((aprovacao) =>
             ativos.some((trabalho) => trabalho.funcionarioId === aprovacao.funcionarioId))} />
     </>;

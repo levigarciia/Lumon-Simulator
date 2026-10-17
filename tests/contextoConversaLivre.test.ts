@@ -39,9 +39,10 @@ test('conversa livre recebe a situação atual e mantém pensamentos e suspeitas
         expect(turnos.size).toBe(2);
         const ana = turnos.get('Ana')!;
         const bia = turnos.get('Bia')!;
-        expect(ana.prompt).toContain('Considere seu pensamento, relações e acontecimentos');
+        expect(ana.prompt).toContain('conforme seu pensamento, relações e acontecimentos');
         for (const { prompt } of turnos.values()) {
-            expect(prompt).toContain('Conversa espontânea a partir da situação atual do escritório');
+            expect(prompt).toContain('Conversa espontânea.');
+            expect(prompt).not.toContain('Assunto sugerido');
             expect(prompt).toContain('Consertos pendentes: Cafeteira [ID cafe]');
             expect(prompt).toContain('Itens de pausa: Máquina de guloseimas');
             expect(prompt).toContain('A Diretoria reorganizou a sala hoje.');

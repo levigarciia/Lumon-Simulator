@@ -34,7 +34,7 @@ O Terminal acompanha a grade e a última seleção dos agentes, sem mostrar o ga
 avaliações. A cota diária de 18 grupos é compartilhada, avança somente na aprovação de arquivos e fica salva
 independentemente do histórico. Delegações e correções não duplicam o crédito de um arquivo. O calendário local
 define cada expediente diário. `shared/departamento.ts` reúne essas regras e a projeção visual segura.
-Comunicados e o manual do departamento trazem a doutrina ficcional de Kier. Ao atingir a cota, a Diretoria
+Comunicados e o manual do departamento trazem a doutrina de Kier. Ao atingir a cota, a Diretoria
 registra um anúncio público e concede 30 moedas extras uma única vez por dia, junto à aprovação que atinge
 a meta. A cota também aparece nas consultas de arquivo e escritório dos agentes.
 
@@ -158,10 +158,20 @@ o escopo. Descanso e Bem estar possuem anexos com corredor e navegação. Ala da
     mostrando Encerrando conversa até concluírem, sem apagar o histórico. O modo sem limite
     remove apenas o teto de falas; os agentes continuam podendo silenciar e encerrar a conversa naturalmente.
     Oferece menções com `@Nome`, conversa livre em rodadas e limite de falas seguidas entre agentes, zerado por uma
-    nova mensagem do jogador ou ao ligar a conversa livre. Quem o jogador cita responde primeiro.
-    A fila prioriza pedidos diretos do jogador e, entre os demais turnos disponíveis, quem teve menos vezes
-    desde a última mensagem do jogador ou ativação da conversa livre. Menções repetidas entre dois colegas
-    não adiam indefinidamente os demais. O aviso de limite aparece uma vez até o jogador retomar a conversa.
+    nova mensagem do jogador ou ao ligar a conversa livre. Quem o jogador cita responde primeiro. Sem menção,
+    a rodada começa por quem foi citado antes dela e ainda não respondeu; sem citação pendente, pelo líder.
+    A fila prioriza pedidos diretos do jogador, depois quem um colega acabou de citar e, entre os demais, quem
+    teve menos vezes desde a última mensagem do jogador ou ativação da conversa livre, sem repetir o último a
+    falar quando houver outro disponível. Nas falas dos agentes, `encontrarInterpelados` reconhece `@Nome` e o
+    vocativo no início de uma frase. O limite de falas seguidas e o corte de frases repetidas encerram trocas em
+    ciclo entre dois colegas. O aviso de limite aparece uma vez até o jogador retomar a conversa.
+    `contarFalasDoEmbate` mede a troca seguida entre dois colegas. Com quatro falas, a reação e a resposta do
+    citado recebem um motivo pedindo que encerre o embate em vez de rebater; com seis, o citado só tem o turno de
+    reação, sem `nenhuma_acao` e com `fazer_pausa`, e precisa ceder, desculpar, reagir, pausar ou ir ao reservado.
+    `interagir_socialmente` recusa mensagens que repetem falas ou ações recentes do autor ao mesmo colega.
+    A cota atual entra no contexto social de cada turno; o texto das tarefas não guarda a cota do início.
+    `removerFrasesRepetidas` tira da fala as frases que o autor já disse desde a última mensagem do jogador e as
+    frases longas copiadas de outros; se nada sobrar, a vez termina em silêncio.
     Cada fala de agente guarda o `eventoId` social, exibido como fonte na transcrição. Quem é citado pelo jogador
     ou por um colega passa antes por um turno de reação que não publica texto livre, mas permite ações públicas.
     Menções promovem a reação e
@@ -264,6 +274,10 @@ Respostas privadas usam sessões separadas do Geral e são entregues ao parceiro
 normal. As instruções e os retornos de conversas reservadas não anunciam observação pelo jogador. Limpar o Chat
 remove suas falas públicas e reservadas, cancela os encontros e descarta notificações pendentes dessas conversas.
 Relações, propostas, episódios lembrados e cópias das evidências são preservados.
+O Histórico exclui um registro ou todos (`excluirHistoricoCompleto`), com confirmação. Ambos apagam as cópias,
+reiniciam as sessões e eliminam as revisões anteriores em disco, sem apenas ocultar os dados. Limpar tudo inclui
+o Work. O Histórico do Work separa as execuções por arquivo e exclui um arquivo ou todos (`excluirArquivoWork`),
+com trabalhos, grade, mensagens das sessões e acontecimentos ligados. A cota do dia não muda.
 O chat individual permite várias threads por funcionário. A estrutura interna do Work preserva projetos e
 threads para execução e compatibilidade, sem oferecer sua seleção no painel de Macrodados do Geral.
 O catálogo fica em `shared/threads.ts` e no campo `threads` do estado. Mensagens e registros de trabalho
@@ -342,6 +356,15 @@ visual verificada, até 35. Essa regra não substitui as recompensas de Macrodad
 * No Claude, o modo conversa usa prompt de sistema próprio, sem o preset do Claude Code nem ferramentas internas,
     e o servidor `lumon` usa `alwaysLoad`. No Codex, as instruções seguem como `developerInstructions`.
 * `tests/orcamentoPrompts.test.ts` limita o tamanho das instruções e dos prompts do Geral e do Work.
+* Os agentes acreditam de verdade que trabalham no andar separado da Lumon. `instrucaoDepartamento` traz essa
+    premissa a todos os canais. Nenhuma instrução menciona ficção, série, personagem ou atuação, e não há
+    assuntos sugeridos por sorteio nem acontecimentos de convivência sorteados pela agenda.
+* `shared/cena.ts`: `instrucaoConvivio` orienta o Geral e o reservado a terem opiniões e iniciativa próprias.
+    O Geral guarda em memória as quatro últimas ações de cada agente (falas, silêncio e ferramentas com efeito)
+    e as mostra nos turnos livres e espontâneos, pedindo variedade; quem só falou é orientado a agir por uma
+    ferramenta, como `interagir_socialmente` ou `fazer_pausa`. `descreverPerfil` gera mania, bordão raro,
+    obsessão e segredo estáveis pelo ID, somados à personalidade nas instruções. As relações chegam ao prompt
+    como frases (`resumirRelacao`), sem números; os valores continuam na ficha e nos retornos MCP.
 
 ## Qualidade
 

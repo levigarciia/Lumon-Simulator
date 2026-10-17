@@ -25,7 +25,8 @@ export function registrarIpc(
     origem: Escritorio | (() => Escritorio),
     janela: () => BrowserWindow | null,
     reiniciar?: () => Promise<Resultado>,
-    partidas?: Pick<Partidas, 'listar' | 'criar' | 'selecionar' | 'excluirRegistroHistorico'>,
+    partidas?: Pick<Partidas, 'listar' | 'criar' | 'selecionar' | 'excluirRegistroHistorico'
+        | 'excluirHistoricoCompleto' | 'excluirArquivoWork'>,
 ): void {
     const obter = typeof origem === 'function' ? origem : () => origem;
     const manipuladores: Manipuladores = {
@@ -50,6 +51,12 @@ export function registrarIpc(
         excluirRegistroHistorico: async (registroId) => partidas
             ? partidas.excluirRegistroHistorico(z.string().min(1).max(120).parse(registroId))
             : obter().excluirRegistroHistorico(z.string().min(1).max(120).parse(registroId)),
+        excluirHistoricoCompleto: async () => partidas
+            ? partidas.excluirHistoricoCompleto()
+            : obter().excluirHistoricoCompleto(),
+        excluirArquivoWork: async (arquivoId) => partidas
+            ? partidas.excluirArquivoWork(id.optional().parse(arquivoId))
+            : obter().excluirArquivoWork(id.optional().parse(arquivoId)),
         limparGeral: async () => obter().limparGeral(),
         limparConversa: async (funcionarioId, threadId) =>
             obter().limparConversa(id.parse(funcionarioId), id.optional().parse(threadId)),

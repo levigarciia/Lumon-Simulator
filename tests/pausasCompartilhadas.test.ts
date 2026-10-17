@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { SimulacaoEscritorio } from '../electron/services/simulacao';
 import { Escritorio } from '../electron/services/escritorio';
-import { estadoInicial } from '../shared/estado';
+import { estadoInicial, esquemaEstado } from '../shared/estado';
 import { capacidadeItem, celulaDeUso, salaVazia, type TipoItem } from '../shared/escritorio';
 import { necessidadesIniciais } from '../shared/necessidades';
 import type { Funcionario } from '../shared/funcionarios';
@@ -75,6 +75,45 @@ test('pontos adicionais giram junto do objeto e a vitrola mantém uma vaga', () 
         expect(celulaDeUso(item, 0)).not.toEqual(celulaDeUso(item, 1));
     }
     expect(capacidadeItem({ tipo: 'vitrola' })).toBe(1);
+});
+
+test('pausa ativa persiste o item e o prazo ao reiniciar a simulação', async () => {
+    let agora = 0;
+    let salvas: Record<string, NonNullable<ReturnType<typeof estadoInicial>['pausas'][string]>> = {};
+    const salaPausa = salaCom('maquina_guloseimas');
+    const ana: Funcionario = { ...equipe[0]!, id: '00000000-0000-4000-8000-000000000001' };
+    const criar = (pausasIniciais: typeof salvas = {}) => new SimulacaoEscritorio({
+        sala: () => salaPausa, funcionarios: () => [ana],
+        statusTrabalho: () => 'ocioso', relogioInicial: 0,
+        necessidadesIniciais: { [ana.id]: { ...necessidadesIniciais } },
+        pausasIniciais, gravar: () => {}, gravarPausas: (novas) => { salvas = structuredClone(novas); },
+        emitirQuadro: () => {}, emitirEstado: () => {}, automatica: false, agoraPausaMs: () => agora,
+    });
+    const primeira = criar();
+    try {
+        void primeira.pedirPausa(ana.id, 'comendo', 5);
+        for (let passo = 0; passo < 300; passo++) primeira.avancar(0.1);
+        expect(salvas[ana.id]?.itemId).toBe('pausa');
+        expect(salvas[ana.id]?.terminaEm).toBe(300000);
+        primeira.encerrar();
+
+        const estado = esquemaEstado.parse({ ...estadoInicial(), sala: salaPausa,
+            funcionarios: [ana], pausas: salvas });
+        agora = 120000;
+        const reiniciada = criar(estado.pausas);
+        try {
+            expect(reiniciada.emPausaNoItem(ana.id)).toBe(true);
+            expect(reiniciada.agentes()[0]?.atividade).toBe('comendo');
+            expect(reiniciada.agentes()[0]?.destinoId).toBe('pausa');
+            reiniciada.avancar(0.1);
+            expect(reiniciada.emPausaNoItem(ana.id)).toBe(true);
+
+            agora = 300000;
+            reiniciada.avancar(0.1);
+            expect(reiniciada.emPausaNoItem(ana.id)).toBe(false);
+            expect(salvas[ana.id]).toBeUndefined();
+        } finally { reiniciada.encerrar(); }
+    } finally { primeira.encerrar(); }
 });
 
 test('companhia incentiva conversa privada no item e encerra o diálogo quando uma pausa termina', async () => {

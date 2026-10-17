@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { Orquestracao } from '../electron/services/orquestracao';
+import { Orquestracao, type PrazosOrquestracao } from '../electron/services/orquestracao';
 import type { Funcionario, Projeto, StatusFuncionario } from '../shared/funcionarios';
 import type { RegistroTrabalho, RespostaTrabalho } from '../shared/trabalho';
 
@@ -7,21 +7,28 @@ const lider = { id: 'lider', nome: 'Cláudio', cargo: 'lider' } as Funcionario;
 const colega = { id: 'colega', nome: 'Roberto', cargo: 'desenvolvedor' } as Funcionario;
 const projeto = { id: 'projeto', nome: 'Projeto', pasta: 'C:/temporario' } as Projeto;
 
-function preparar(executar: (pessoa: Funcionario, projeto: Projeto, texto: string) => Promise<RespostaTrabalho>) {
+function preparar(
+    executar: (pessoa: Funcionario, projeto: Projeto, texto: string) => Promise<RespostaTrabalho>,
+    prazos?: PrazosOrquestracao,
+) {
     let trabalhos: RegistroTrabalho[] = [];
     const funcionarios = [lider, colega];
     const interrompidos: string[] = [];
     const status: Record<string, StatusFuncionario> = {};
+    const prompts: string[] = [];
     const orquestracao = new Orquestracao({
         funcionarios: () => funcionarios,
         projetos: () => [projeto],
         trabalhos: () => trabalhos,
         gravar: (novos) => { trabalhos = novos; },
         status: (id) => status[id] ?? 'ocioso',
-        executar,
+        executar: (pessoa, atual, texto) => {
+            prompts.push(texto);
+            return executar(pessoa, atual, texto);
+        },
         interromper: (id) => { interrompidos.push(id); },
-    });
-    return { orquestracao, trabalhos: () => trabalhos, status, funcionarios, interrompidos };
+    }, prazos);
+    return { orquestracao, trabalhos: () => trabalhos, status, funcionarios, interrompidos, prompts };
 }
 
 async function estabilizar() {
@@ -29,6 +36,19 @@ async function estabilizar() {
 }
 
 describe('orquestração no Work', () => {
+    test('agente que não responde é interrompido no prazo e libera a avaliação do pedido', async () => {
+        const caso = preparar(() => new Promise(() => {}), { liderMs: 20, delegadoMs: 10, toleranciaMs: 10 });
+        caso.orquestracao.enviar(projeto.id, 'Pedido eterno');
+        await Bun.sleep(60);
+        expect(caso.interrompidos).toEqual([lider.id]);
+        const [trabalho] = caso.trabalhos();
+        expect(trabalho?.estado).toBe('interrompido');
+        expect(caso.orquestracao.rejeitarEntrega(trabalho!.id, 'Travou')).not.toEqual({
+            ok: false, erro: 'Aguarde o fim do pedido.',
+        });
+        expect(caso.orquestracao.enviar(projeto.id, 'Novo pedido').ok).toBe(true);
+    });
+
     test('executa threads com líderes distintos e interrompe somente a thread escolhida', async () => {
         const conclusoes = new Map<string, (resposta: RespostaTrabalho) => void>();
         const caso = preparar((pessoa) => new Promise((resolver) => { conclusoes.set(pessoa.id, resolver); }));
@@ -109,6 +129,39 @@ describe('orquestração no Work', () => {
         expect(caso.trabalhos().map((item) => item.estado)).toEqual(['concluido', 'concluido']);
         expect(caso.trabalhos()[0]?.resultado).toBe('Entrega revisada.');
         expect(caso.trabalhos()[0]?.pedidoId).toBe(caso.trabalhos()[1]?.pedidoId);
+    });
+
+    test('refinamento alterna colegas ainda não participantes e depois volta a delegar', async () => {
+        const concluir = new Map<string, (resposta: RespostaTrabalho) => void>();
+        const caso = preparar((pessoa) => new Promise((resolver) => { concluir.set(pessoa.id, resolver); }));
+        const ana = { ...colega, id: 'ana', nome: 'Ana' };
+        caso.funcionarios.push(ana);
+        caso.orquestracao.enviar(projeto.id, 'Refine o arquivo', 'thread', undefined, 'arquivo');
+        await estabilizar();
+        expect(caso.prompts[0]).toContain('Não repita colegas enquanto houver alguém disponível');
+        expect(caso.prompts[0]).toContain('Próxima etapa: delegue a Roberto');
+
+        const primeira = caso.orquestracao.delegar(lider.id, colega.id, 'Refine um grupo');
+        await estabilizar();
+        concluir.get(colega.id)!({ ok: true, texto: 'Grupo aceito.' });
+        expect(await primeira).toContain('Próxima etapa: delegue a Ana');
+
+        const repetida = await caso.orquestracao.delegar(lider.id, colega.id, 'Refine outro grupo');
+        expect(repetida).toContain('Ana');
+        expect(caso.trabalhos()).toHaveLength(2);
+
+        const segunda = caso.orquestracao.delegar(lider.id, ana.id, 'Refine um grupo');
+        await estabilizar();
+        concluir.get(ana.id)!({ ok: true, texto: 'Grupo aceito.' });
+        expect(await segunda).toContain('delegue novamente');
+
+        const aposRotacao = caso.orquestracao.delegar(lider.id, colega.id, 'Refine outro grupo');
+        await estabilizar();
+        concluir.get(colega.id)!({ ok: true, texto: 'Grupo aceito de novo.' });
+        expect(await aposRotacao).toContain('Grupo aceito de novo.');
+        expect(caso.trabalhos()).toHaveLength(4);
+        concluir.get(lider.id)!({ ok: false, texto: 'Teste encerrado.' });
+        await estabilizar();
     });
 
     test('impede delegação fora do Work, por colegas, para si e para nomes ambíguos', async () => {

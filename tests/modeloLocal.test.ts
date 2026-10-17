@@ -87,7 +87,7 @@ describe('modelo local', () => {
         } finally { sessao.encerrar(); servidor.encerrar(); }
     });
 
-    test('reação social recupera truncamento sem executar JSON parcial nem pedir resumo', async () => {
+    test('reação social encaminha ferramentas nativas depois de recuperar truncamento', async () => {
         const limites: unknown[] = [];
         const publicadas: string[] = [];
         let pensamentos = 0;
@@ -100,13 +100,16 @@ describe('modelo local', () => {
             estado: { fase: 'pronto', detalhe: 'Teste', contexto: 16384 },
             completar: async (corpo) => {
                 limites.push(corpo.max_tokens);
-                expect(corpo.response_format).toMatchObject({ type: 'json_schema' });
-                expect(corpo.tools).toBeUndefined();
+                expect(corpo.response_format).toBeUndefined();
+                expect(corpo.tools).toContainEqual(expect.objectContaining({
+                    function: expect.objectContaining({ name: 'atualizar_pensamento' }),
+                }));
+                expect(corpo.tool_choice).toBe('required');
                 if (limites.length === 1) return new Response('data: '
                     + JSON.stringify({ choices: [{ delta: { content: '{"tipo":"acao"' }, finish_reason: 'length' }] })
                     + '\n\n');
-                return sse(JSON.stringify({ tipo: 'acao', ferramenta: 'atualizar_pensamento',
-                    argumentos: { pensamento: 'Vou tratar o assunto com o líder.' } }));
+                return sse('', [{ index: 0, id: 'pensamento', function: { name: 'atualizar_pensamento',
+                    arguments: JSON.stringify({ pensamento: 'Vou tratar o assunto com o líder.' }) } }]);
             },
         }) } as Pick<MotorLocal, 'usar'>;
         const sessao = criarSessaoLocal({ modelo: 'qwen3.5-9b-q4', pasta: '.', autonomia: false,
@@ -121,7 +124,7 @@ describe('modelo local', () => {
         } finally { sessao.encerrar(); servidor.encerrar(); }
     });
 
-    test('turno social usa schema JSON e executa a decisão pelo MCP sem publicar o protocolo', async () => {
+    test('turno social usa chamadas de ferramenta nativas sem publicar o protocolo', async () => {
         let inferencias = 0;
         let pausas = 0;
         const textos: string[] = [];
@@ -134,12 +137,13 @@ describe('modelo local', () => {
             estado: { fase: 'pronto', detalhe: 'Teste', contexto: 16384 },
             completar: async (corpo) => {
                 inferencias++;
-                expect(corpo.response_format).toMatchObject({ type: 'json_schema' });
-                expect(corpo.tools).toBeUndefined();
-                if (inferencias === 1) return sse(JSON.stringify({ tipo: 'acao', ferramenta: 'fazer_pausa',
-                    argumentos: { atividade: 'comendo', minutos: 5 } }));
-                expect(pausas).toBe(1);
-                return sse(JSON.stringify({ tipo: 'fala', texto: 'Terminei a pausa.' }));
+                expect(corpo.response_format).toBeUndefined();
+                expect(corpo.tools).toContainEqual(expect.objectContaining({
+                    function: expect.objectContaining({ name: 'fazer_pausa' }),
+                }));
+                expect(corpo.tool_choice).toBe('auto');
+                return sse('', [{ index: 0, id: 'pausa', function: { name: 'fazer_pausa',
+                    arguments: JSON.stringify({ atividade: 'comendo', minutos: 5 }) } }]);
             },
         }) } as Pick<MotorLocal, 'usar'>;
         const sessao = criarSessaoLocal({ modelo: 'qwen3.5-9b-q4', pasta: '.', autonomia: false,

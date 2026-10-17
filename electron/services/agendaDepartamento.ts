@@ -5,7 +5,7 @@ import {
     agendaEventos, duracaoAvariaMs, escolherEvento, estresseVisita, rankingDoDia, semanasDeCasa, textoVisita,
     type TipoEventoDepartamento,
 } from '../../shared/eventosDepartamento';
-import type { ArquivoRefinamento } from '../../shared/refinamento';
+import { formatarPrazo, type ArquivoRefinamento } from '../../shared/refinamento';
 import type { EventoSocial } from '../../shared/social';
 
 type NovoEvento = Omit<EventoSocial, 'id' | 'sequencia' | 'criadoEm'>;
@@ -124,7 +124,7 @@ export class AgendaDepartamento {
         if (!resultado?.ok) return false;
         this.registro.registrar({ tipo: 'comunicado', autorId: 'diretoria', alcance: 'publico', ouvintes: [],
             fontes: [], texto: `A Diretoria entregou o arquivo ${resultado.nome} para refinamento no Work. `
-                + `Prazo: ${resultado.prazo}. O líder coordena a distribuição das etapas.` });
+                + `Prazo: ${formatarPrazo(resultado)}. O líder coordena a distribuição das etapas.` });
         return true;
     }
 

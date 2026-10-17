@@ -1,6 +1,17 @@
 import { expect, test } from 'bun:test';
 import { gerarArquivo, descreverGrade, refinar, progressoRefinamento, recompensaRefinamento,
-    orientarRefinamento, descreverEnvios, esquemaArquivoRefinamento, temperamentos } from '../shared/refinamento';
+    orientarRefinamento, descreverEnvios, esquemaArquivoRefinamento, problemaSelecao,
+    temperamentos } from '../shared/refinamento';
+
+test('seleção fora da regra pública é explicada antes de consumir tentativa', () => {
+    const arquivo = gerarArquivo(7, new Date('2030-01-01T00:00:00Z'));
+    for (const grupo of arquivo.grupos) expect(problemaSelecao(arquivo, grupo.celulas)).toBeUndefined();
+    expect(problemaSelecao(arquivo, ['D10', 'E1', 'E2'])).toContain('mesma linha');
+    expect(problemaSelecao(arquivo, ['A1', 'A2', 'A4'])).toContain('consecutivas');
+    expect(problemaSelecao(arquivo, ['A1', 'A2'])).toContain('exatamente três');
+    const refinado = refinar(arquivo, 'pessoa', arquivo.grupos[0]!.celulas, arquivo.grupos[0]!.temperamento).arquivo;
+    expect(problemaSelecao(refinado, arquivo.grupos[0]!.celulas)).toContain('já refinadas');
+});
 
 test('arquivos determinísticos aceitam grupos corretos uma vez e preservam o original', () => {
     const prazo = new Date('2030-01-01T00:00:00Z');
@@ -49,6 +60,18 @@ test('seleção inválida e caixa incorreta dão orientações diferentes sem ex
     expect(arquivo.envios).toHaveLength(0);
     const legado = { ...arquivo, envios: undefined };
     expect(esquemaArquivoRefinamento.parse(legado).envios).toEqual([]);
+});
+
+test('não registra de novo uma seleção rejeitada nem consome outra tentativa', () => {
+    const arquivo = gerarArquivo(9, new Date('2030-01-01'));
+    const primeira = refinar(arquivo, 'pessoa', ['A1', 'B1', 'C1'], 'pavor', 'etapa1');
+    expect(primeira.resultado).toBe('rejeitado');
+    expect(primeira.arquivo.envios).toHaveLength(1);
+
+    const repetida = refinar(primeira.arquivo, 'colega', ['C1', 'A1', 'B1'], 'alegria', 'etapa2');
+    expect(repetida.repetida).toBe('rejeitada');
+    expect(repetida.arquivo).toBe(primeira.arquivo);
+    expect(repetida.arquivo.envios).toHaveLength(1);
 });
 
 test('próximo colega recebe a seleção reconhecida e as caixas restantes só a partir dos envios', () => {

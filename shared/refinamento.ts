@@ -11,7 +11,7 @@ export const nomesTemperamento: Record<Temperamento, string> = {
 const linhas = 8;
 const colunas = 10;
 const gruposPorArquivo = 6;
-const letrasLinha = 'ABCDEFGH';
+const letrasColuna = 'ABCDEFGHIJ';
 
 const cidades = [
     'Cold Harbor', 'Siena', 'Tumwater', 'Allentown', 'Dranesville', 'Moonbeam', 'Jesup', 'Kingsport',
@@ -61,7 +61,7 @@ function gerador(semente: number): () => number {
 }
 
 function nomeCelula(linha: number, coluna: number): string {
-    return `${letrasLinha[linha]}${coluna + 1}`;
+    return `${letrasColuna[coluna]}${linha + 1}`;
 }
 
 function vizinhos(linha: number, coluna: number): [number, number][] {
@@ -124,6 +124,13 @@ export function gerarArquivo(semente: number, prazo: Date): ArquivoRefinamento {
     };
 }
 
+const formatoPrazo = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+/** Use ao mostrar o prazo em textos: converte o ISO salvo para o horário local da máquina. */
+export function formatarPrazo(arquivo: Pick<ArquivoRefinamento, 'prazo'>): string {
+    return formatoPrazo.format(new Date(arquivo.prazo));
+}
+
 export function progressoRefinamento(arquivo: ArquivoRefinamento): number {
     const refinados = arquivo.grupos.filter((grupo) => grupo.refinadoPor).length;
     return Math.round((refinados / arquivo.grupos.length) * 100);
@@ -135,11 +142,40 @@ export function recompensaRefinamento(arquivo: ArquivoRefinamento): number {
     return refinados * 8 + (refinados > 0 && refinados === arquivo.grupos.length ? 12 : 0);
 }
 
-/** Grade como texto para o agente. Células já refinadas aparecem como `*`. */
+function digitoDaCelula(arquivo: ArquivoRefinamento, celula: string): number {
+    const coluna = letrasColuna.indexOf(celula[0]!);
+    const linha = Number(celula.slice(1)) - 1;
+    return arquivo.grade[linha]![coluna]!;
+}
+
+function caixasDescobertas(arquivo: ArquivoRefinamento): string {
+    const caixas = new Map(arquivo.grupos.filter((grupo) => grupo.refinadoPor)
+        .map((grupo) => [digitoDaCelula(arquivo, grupo.celulas[0]!), grupo.temperamento]));
+    if (!caixas.size) return '';
+    return '\nCaixas já descobertas (o mesmo dígito sempre vai para a mesma caixa): '
+        + [...caixas].map(([digito, temperamento]) => `dígito ${digito} = ${temperamento}`).join(', ') + '.';
+}
+
+/**
+ * Grade como texto para o agente, no padrão de planilha: letra é a coluna e número é a linha. Células já
+ * refinadas aparecem como `*`, seguidas das caixas já descobertas por dígito.
+ */
 export function descreverGrade(arquivo: ArquivoRefinamento): string {
     const refinadas = new Set(arquivo.grupos.filter((grupo) => grupo.refinadoPor).flatMap((grupo) => grupo.celulas));
-    return arquivo.grade.map((linha, l) => linha.map((digito, c) =>
+    const grade = arquivo.grade.map((linha, l) => `Linha ${l + 1}: ` + linha.map((digito, c) =>
         `${nomeCelula(l, c)}=${refinadas.has(nomeCelula(l, c)) ? '*' : digito}`).join('  ')).join('\n');
+    return 'Letra é a coluna, número é a linha. Um grupo são três letras seguidas com o mesmo número.\n'
+        + grade + caixasDescobertas(arquivo);
+}
+
+/** Registra uma seleção recusada pela regra pública, para a equipe não repeti-la. Função pura. */
+export function registrarRecusa(
+    arquivo: ArquivoRefinamento, funcionarioId: string, celulas: string[], temperamento: Temperamento,
+    trabalhoId?: string,
+): ArquivoRefinamento {
+    const envio = { funcionarioId, trabalhoId, celulas: celulas.map((celula) => celula.trim().toUpperCase()),
+        temperamento, resultado: 'rejeitado' as const };
+    return { ...arquivo, envios: [...(arquivo.envios ?? []), envio].slice(-48) };
 }
 
 /** Orienta a próxima tentativa sem revelar células corretas nem a classificação interna. */
@@ -149,7 +185,36 @@ export function orientarRefinamento(resultado: ResultadoRefinamento): string {
         return 'Seleção reconhecida, caixa incorreta. Preserve as células e teste outra caixa ainda não tentada.';
     }
     return 'Seleção não reconhecida. Mude as células antes de reenviar; trocar só a caixa não resolve. '
-        + 'Selecione três células consecutivas na mesma linha, com o mesmo dígito, sem incluir o restante da linha.';
+        + 'Selecione três células consecutivas na mesma linha (mesmo número, letras seguidas), com o mesmo dígito.';
+}
+
+/**
+ * Confere a regra pública da seleção (três células consecutivas, mesma linha, mesmo dígito, ainda não refinadas)
+ * antes de consumir uma tentativa. Devolve a explicação do problema ou `undefined` quando a seleção é plausível.
+ */
+export function problemaSelecao(arquivo: ArquivoRefinamento, celulas: string[]): string | undefined {
+    const posicoes = celulas.map((celula) => celula.trim().toUpperCase().match(/^([A-J])([1-8])$/));
+    if (posicoes.length !== 3 || posicoes.some((posicao) => !posicao)) {
+        return 'Informe exatamente três células válidas, de A1 a J8 (letra é a coluna, número é a linha).';
+    }
+    const coordenadas = posicoes.map((posicao) =>
+        [Number(posicao![2]) - 1, letrasColuna.indexOf(posicao![1]!)] as const)
+        .sort((a, b) => a[1] - b[1]);
+    const nomes = coordenadas.map(([linha, coluna]) => nomeCelula(linha, coluna));
+    if (new Set(coordenadas.map(([linha]) => linha)).size !== 1) {
+        return `${nomes.join(', ')} não estão na mesma linha. Uma seleção nunca atravessa linhas: `
+            + 'mantenha o número e avance a letra, como C4, D4 e E4.';
+    }
+    if (coordenadas.some(([, coluna], indice) => indice > 0 && coluna !== coordenadas[indice - 1]![1] + 1)) {
+        return `${nomes.join(', ')} não são consecutivas.`;
+    }
+    const refinadas = new Set(arquivo.grupos.filter((grupo) => grupo.refinadoPor).flatMap((grupo) => grupo.celulas));
+    if (nomes.some((nome) => refinadas.has(nome))) return 'Essa seleção inclui células já refinadas (`*`).';
+    const digitos = coordenadas.map(([linha, coluna]) => arquivo.grade[linha]![coluna]!);
+    if (new Set(digitos).size !== 1) {
+        return `${nomes.map((nome, indice) => `${nome}=${digitos[indice]}`).join(', ')} não têm o mesmo dígito. `
+            + 'Procure na grade três dígitos iguais lado a lado.';
+    }
 }
 
 /** Compartilha apenas envios realmente feitos para a equipe não repetir tentativas descartadas. */
@@ -180,8 +245,13 @@ export function descreverEnvios(arquivo: ArquivoRefinamento): string {
 export function refinar(
     arquivo: ArquivoRefinamento, funcionarioId: string, celulas: string[], temperamento: Temperamento,
     trabalhoId?: string,
-): { arquivo: ArquivoRefinamento; resultado: ResultadoRefinamento } {
+): { arquivo: ArquivoRefinamento; resultado: ResultadoRefinamento; repetida?: 'aceita' | 'rejeitada' } {
     const enviadas = new Set(celulas.map((celula) => celula.trim().toUpperCase()));
+    const chaveEnvio = celulas.map((celula) => celula.trim().toUpperCase()).sort().join('\0');
+    const envioAnterior = arquivo.envios?.find((envio) => envio.resultado !== 'temperamento_incorreto'
+        && [...envio.celulas].sort().join('\0') === chaveEnvio);
+    if (envioAnterior) return { arquivo, resultado: 'rejeitado',
+        repetida: envioAnterior.resultado === 'aceito' ? 'aceita' : 'rejeitada' };
     const indice = arquivo.grupos.findIndex((grupo) => !grupo.refinadoPor
         && grupo.celulas.every((celula) => enviadas.has(celula)) && enviadas.size === 3 && celulas.length === 3);
     const grupo = arquivo.grupos[indice];

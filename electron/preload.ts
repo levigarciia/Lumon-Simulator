@@ -18,6 +18,8 @@ const api: ApiLumon = {
     obterGeral: invocar('obterGeral'),
     obterHistorico: invocar('obterHistorico'),
     excluirRegistroHistorico: invocar('excluirRegistroHistorico'),
+    excluirHistoricoCompleto: invocar('excluirHistoricoCompleto'),
+    excluirArquivoWork: invocar('excluirArquivoWork'),
     limparGeral: invocar('limparGeral'),
     limparConversa: invocar('limparConversa'),
     enviarGeral: invocar('enviarGeral'),

@@ -63,6 +63,18 @@ export function aplicarReacao(
         ressentimento: limitar(atual.ressentimento + delta.ressentimento) };
 }
 
+/** Resume a relação em palavras para o prompt, sem números que levem o modelo a uma leitura mecânica. */
+export function resumirRelacao(relacao: Relacao): string {
+    const faixa = (valor: number, baixo: string, medio: string, alto: string) =>
+        valor <= 30 ? baixo : valor >= 70 ? alto : medio;
+    return [
+        faixa(relacao.confianca, 'desconfia', 'confia com reservas', 'confia'),
+        faixa(relacao.afinidade, 'não gosta muito', 'sem afeto especial', 'gosta'),
+        faixa(relacao.respeito, 'duvida da competência', 'respeito comum', 'admira a competência'),
+        ...(relacao.ressentimento >= 35 ? ['guarda mágoa'] : relacao.ressentimento >= 15 ? ['leve incômodo'] : []),
+    ].join(', ');
+}
+
 /** Traduz a visão privada de um colega em uma postura de conversa própria dessa relação. */
 export function descreverCondutaRelacional(relacao: Relacao, personalidade: Personalidade): string {
     const conduta: string[] = [];

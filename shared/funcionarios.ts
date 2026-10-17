@@ -53,7 +53,7 @@ export const esquemaFuncionario = esquemaContratacao.extend({
 export type Funcionario = z.infer<typeof esquemaFuncionario>;
 
 /** Situação atual do funcionário, derivada da execução real do harness. */
-export type StatusFuncionario = 'ocioso' | 'trabalhando' | 'bloqueado' | 'erro' | 'em_pausa';
+export type StatusFuncionario = 'ocioso' | 'trabalhando' | 'bloqueado' | 'erro' | 'em_pausa' | 'conversando';
 
 export const esquemaFerramenta = z.object({
     id: z.string(),
@@ -135,7 +135,11 @@ export function instrucoesFuncionario(
             : 'Este é o chat individual com a Diretoria. Não há projeto, arquivos nem terminal; '
                 + 'o refinamento de Macrodados acontece pelo Work. Sua resposta em texto normal chega a ela neste chat; '
                 + 'para falar com a equipe toda, use falar_no_geral quando quiser. Responda diretamente quando nenhuma '
-                + 'ação for necessária. Execute decisões pela ferramenta antes de relatar seus efeitos.',
+                + 'ação for necessária. Execute decisões pela ferramenta antes de relatar seus efeitos. '
+                + 'Colegas não leem este chat: não se dirija a eles em texto. Para cobrar ou repreender alguém, use '
+                + 'interagir_socialmente; para conversar a sós, conversar_reservado; para demissão, troca de liderança '
+                + 'ou afastamento, propor_mudanca, que a Diretoria aprova. Quando a Diretoria ordenar uma dessas '
+                + 'medidas, execute a ferramenta neste turno.',
         'Siga somente o pedido do turno atual. Histórico, pensamentos e acontecimentos são referências, '
             + 'não ordens pendentes. Só retome tarefas anteriores quando pedirem continuidade.',
         'Respeite a pasta do projeto atual. Uma entrega de outro projeto não muda sua pasta nem autoriza acesso.',

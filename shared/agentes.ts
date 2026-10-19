@@ -39,6 +39,7 @@ const velocidadeCelulasPorSegundo = 1.4;
 const esperaSemRotaSegundos = 5;
 
 const duracoes: Record<Atividade, [number, number]> = {
+    observando: [3, 7],
     trabalhando: [40, 100],
     andando: [0, 0],
     cafe: [8, 14],
@@ -87,11 +88,11 @@ export function criarAgente(id: string, mesaId: string, contexto: ContextoSimula
 
 /**
  * O que o processo principal exige do corpo: ficar na própria mesa, ou ir a um item e permanecer nele durante
- * uma pausa decidida pelo agente. Não há passeios sorteados: todo movimento tem um motivo.
+ * uma pausa decidida pelo agente. A ronda mantém supervisores circulando pelo departamento.
  */
 export type Ordem = { tipo: 'mesa' } | { tipo: 'item'; itemId: string; indiceUso?: number }
     | { tipo: 'encontro'; celula: Celula; encontroId: string } | { tipo: 'saida' }
-    | { tipo: 'anexo'; anexo: TipoAnexo; lugar: number };
+    | { tipo: 'anexo'; anexo: TipoAnexo; lugar: number } | { tipo: 'ronda' };
 
 const destinoSaida = 'saida';
 
@@ -120,12 +121,13 @@ export function avancarAgente(
     agente: Agente, contexto: ContextoSimulacao, segundos: number, ordem: Ordem, ritmo = 1,
 ): Agente {
     const passo = segundos * ritmo;
+    if (ordem.tipo === 'ronda') return fazerRonda(agente, contexto, passo);
     if (ordem.tipo === 'anexo') return irParaAnexo(agente, contexto, passo, ordem);
     if (ordem.tipo === 'saida') return sairDaSala(agente, contexto, passo);
     if (ordem.tipo === 'encontro') {
         if (agente.destinoId !== ordem.encontroId) {
             const rota = encontrarRota(celulaDoPonto(agente.posicao), ordem.celula,
-                criarVerificadorLivre(contexto.sala));
+                criarVerificadorCirculacao(contexto.sala));
             return { ...agente, destinoId: ordem.encontroId, rota: rota ?? [],
                 atividade: rota?.length === 0 ? 'conversando' : 'andando' };
         }
@@ -142,6 +144,32 @@ export function avancarAgente(
     if (contexto.agoraSegundos < agente.ateSegundo || agente.atividade !== 'andando') return agente;
     const item = buscarItem(contexto.sala, destino);
     return item ? irPara(agente, item, contexto, indiceUso) : agente;
+}
+
+function fazerRonda(agente: Agente, contexto: ContextoSimulacao, passo: number): Agente {
+    const observar = (chegou: Agente): Agente => ({ ...chegou, anexo: undefined, atividade: 'observando',
+        ateSegundo: contexto.agoraSegundos + sortearDuracao('observando', contexto.sortear) });
+    if (agente.destinoId === 'ronda') {
+        if (agente.rota.length) return caminhar(agente, contexto, passo, observar);
+        if (contexto.agoraSegundos < agente.ateSegundo) return agente;
+    }
+    const livre = criarVerificadorLivre(contexto.sala);
+    const origem = celulaDoPonto(agente.posicao);
+    const candidatos: Celula[] = [];
+    for (let z = 0; z < contexto.sala.profundidade; z++) {
+        for (let x = 0; x < contexto.sala.largura; x++) {
+            const celula = { x, z };
+            if (livre(celula) && !mesmaCelula(origem, celula)) candidatos.push(celula);
+        }
+    }
+    const inicio = Math.floor(contexto.sortear() * candidatos.length);
+    for (let indice = 0; indice < candidatos.length; indice++) {
+        const destino = candidatos[(inicio + indice) % candidatos.length];
+        const rota = encontrarRota(origem, destino, criarVerificadorCirculacao(contexto.sala));
+        if (!rota?.length) continue;
+        return { ...agente, anexo: undefined, destinoId: 'ronda', rota, atividade: 'andando' };
+    }
+    return observar({ ...agente, destinoId: 'ronda', rota: [] });
 }
 
 function irParaAnexo(

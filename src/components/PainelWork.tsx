@@ -1,5 +1,6 @@
 ﻿import { Stop } from '@phosphor-icons/react';
 import { useEffect, useState } from 'react';
+import { encontrarArquivoDisponivel } from '../../shared/fluxoRefinamento';
 import type { Aprovacao, Funcionario } from '../../shared/funcionarios';
 import type { Resultado } from '../../shared/ponte';
 import { threadPrincipal } from '../../shared/threads';
@@ -9,7 +10,7 @@ import { HistoricoArquivos } from './refinamento/HistoricoArquivos';
 import { Aprovacoes } from './PainelFuncionario';
 import { Botao, classeEntrada } from './ui';
 import { cotaAtual, prepararTerminal, type CotaDepartamento } from '../../shared/departamento';
-import type { ArquivoRefinamento } from '../../shared/refinamento';
+import { progressoRefinamento, type ArquivoRefinamento } from '../../shared/refinamento';
 import { TerminalMacrodados } from './refinamento/TerminalMacrodados';
 import { CotaDoDepartamento, DoutrinaDepartamento } from './refinamento/DoutrinaDepartamento';
 
@@ -24,7 +25,7 @@ type PropriedadesWork = {
 
 /** Acompanha o refinamento simulado, desde a abertura do arquivo até a avaliação da Diretoria. */
 export function PainelWork({ funcionarios, trabalhos, aprovacoes, executar, refinamentos, cota }: PropriedadesWork) {
-    const [minutos, setMinutos] = useState(5);
+    const [minutos, setMinutos] = useState(10);
     const [iniciando, setIniciando] = useState(false);
     const [aba, setAba] = useState<'terminal' | 'historico'>('terminal');
     const [, atualizarDia] = useState(0);
@@ -38,7 +39,10 @@ export function PainelWork({ funcionarios, trabalhos, aprovacoes, executar, refi
     const temLider = funcionarios.some((pessoa) => pessoa.cargo === 'lider');
     const ocupado = ativos.length > 0;
     const trabalhoAtual = ativos.at(-1) ?? simulacoes.at(-1);
-    const arquivo = trabalhoAtual?.arquivoId ? refinamentos[trabalhoAtual.arquivoId] : undefined;
+    const pendente = encontrarArquivoDisponivel(refinamentos, trabalhos);
+    const arquivo = ocupado && trabalhoAtual?.arquivoId ? refinamentos[trabalhoAtual.arquivoId]
+        : pendente ?? (trabalhoAtual?.arquivoId ? refinamentos[trabalhoAtual.arquivoId] : undefined);
+    const completo = !!arquivo && progressoRefinamento(arquivo) === 100;
     const iniciar = async () => {
         if (iniciando || ocupado || !temLider) return;
         setIniciando(true);
@@ -59,21 +63,23 @@ export function PainelWork({ funcionarios, trabalhos, aprovacoes, executar, refi
             <div className="flex items-center justify-between gap-2">
                 <span className="text-[13px] font-medium text-principal">Macrodados</span>
                 <span role="status" className="text-[11px] text-discreto">
-                    {ocupado ? 'Refinamento em andamento' : arquivo ? 'Arquivo encerrado' : 'Aguardando arquivo'}
+                    {ocupado ? 'Refinamento em andamento' : completo ? 'Arquivo completo'
+                        : arquivo ? 'Disponível para continuar' : 'Aguardando arquivo'}
                 </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
                 <label className="flex items-center gap-2 text-[12px] text-secundario">
-                    Duração
-                    <select aria-label="Duração do refinamento" value={minutos} disabled={iniciando || ocupado}
+                    Período
+                    <select aria-label="Duração do período de trabalho" value={minutos} disabled={iniciando || ocupado}
                         onChange={(evento) => setMinutos(Number(evento.target.value))} className={classeEntrada}>
-                        {[1, 5, 15, 30, 60].map((valor) => <option key={valor} value={valor}>{valor} min</option>)}
+                        {[1, 5, 10, 15, 30, 60].map((valor) => <option key={valor} value={valor}>{valor} min</option>)}
                     </select>
                 </label>
                 {ocupado ? <Botao variante="perigo" onClick={interromper}>
-                    <Stop size={14} weight="fill" /> Interromper refinamento
+                    <Stop size={14} weight="fill" /> Pausar equipe
                 </Botao> : <Botao variante="principal" disabled={iniciando || !temLider}
-                    onClick={() => void iniciar()}>{iniciando ? 'Iniciando...' : 'Iniciar macrodados'}</Botao>}
+                    onClick={() => void iniciar()}>{iniciando ? 'Iniciando...'
+                        : pendente ? 'Retomar com o líder' : 'Iniciar macrodados'}</Botao>}
             </div>
             {!temLider && <p className="text-[12px] text-[#e5c587]">
                 Defina um líder para coordenar o refinamento.
@@ -89,7 +95,8 @@ export function PainelWork({ funcionarios, trabalhos, aprovacoes, executar, refi
             </button>)}
         </div>
         {aba === 'terminal' ? <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
-            <TerminalMacrodados arquivo={arquivo ? prepararTerminal(arquivo) : undefined}
+            <TerminalMacrodados arquivo={arquivo ? prepararTerminal({ ...arquivo,
+                prazo: ocupado ? trabalhoAtual?.prazo ?? arquivo.prazo : arquivo.prazo }) : undefined}
                 ativo={ocupado} funcionarios={funcionarios} />
             <DoutrinaDepartamento cota={cotaDoDia} trabalhando={ocupado} />
             {simulacoes.some((item) => item.avaliacao?.estado === 'aguardando_aprovacao') && <Botao

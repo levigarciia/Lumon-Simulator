@@ -20,7 +20,7 @@ export function TerminalMacrodados({ arquivo, ativo, funcionarios }: {
     if (!arquivo) return <div className="terminal-macrodados flex min-h-64 flex-col items-center justify-center p-6">
         <span className="mb-4 text-[11px] tracking-[0.3em]">LUMON INDUSTRIES</span>
         <p className="text-[14px]">Nenhum arquivo carregado</p>
-        <p className="mt-2 text-center text-[12px] opacity-70">Inicie o refinamento para acompanhar sua equipe.</p>
+        <p className="mt-2 text-center text-[12px] opacity-70">Novos arquivos chegam pelo Geral.</p>
     </div>;
     const segundos = Math.max(0, Math.ceil((Date.parse(arquivo.prazo) - agora) / 1000));
     const tempo = `${Math.floor(segundos / 60).toString().padStart(2, '0')}:${(segundos % 60)
@@ -33,11 +33,12 @@ export function TerminalMacrodados({ arquivo, ativo, funcionarios }: {
     return <section className="terminal-macrodados p-3" aria-label="Terminal de Macrodados">
         <div className="mb-3 flex items-center justify-between gap-2 border-b border-current/25 pb-2 text-[11px]">
             <strong className="truncate text-[13px]">{arquivo.nome}</strong>
-            <span>{ativo ? segundos ? tempo : 'Prazo encerrado' : 'Sessão encerrada'}</span>
+            <span>{progresso === 100 ? 'Arquivo completo' : ativo
+                ? segundos ? tempo : 'Período encerrado' : 'Aguardando a equipe'}</span>
         </div>
         <div className="grid grid-cols-10 gap-y-1" aria-label="Grade numérica">
             {arquivo.grade.flatMap((linha, l) => linha.map((digito, c) => {
-                const celula = `${String.fromCharCode(65 + l)}${c + 1}`;
+                const celula = `${String.fromCharCode(65 + c)}${l + 1}`;
                 const selecionada = selecionadas.has(celula);
                 const refinada = refinadas.has(celula);
                 return <span key={celula} data-celula={celula} data-selecionada={selecionada}

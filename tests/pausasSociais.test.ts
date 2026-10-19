@@ -50,8 +50,8 @@ test('pausa persiste sem agendar turnos e permite companhia por decisão própri
         const url = await escritorio['mcp'].urlDe(bia, 'geral');
         await cliente.connect(new StreamableHTTPClientTransport(new URL(url)));
         for (const alcance of ['publico', 'local']) {
-            const resposta = await cliente.callTool({ name: 'interagir_socialmente', arguments: {
-                funcionario: ana, acao: 'elogiar', mensagem: 'Bom trabalho.', alcance, fontes: [],
+            const resposta = await cliente.callTool({ name: 'elogiar', arguments: {
+                funcionario: ana, mensagem: 'Bom trabalho.', alcance, fontes: [],
             } });
             expect(JSON.stringify(resposta)).toContain('Converse somente em particular');
         }

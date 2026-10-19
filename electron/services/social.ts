@@ -1,3 +1,4 @@
+﻿import { concluirAcao, recusarAcao, normalizarResultado, type ResultadoAcao } from './ferramentas/resultado';
 import { randomUUID } from 'node:crypto';
 import { migrarEventoDiretoria } from '../../shared/diretoria';
 import type { Agente } from '../../shared/agentes';
@@ -40,7 +41,7 @@ type RegistroSocial = {
     aoRegistrar?: (evento: EventoSocial) => void;
     decidir: (proposta: PropostaPolitica) => Resultado;
     nomeResponsavel?: () => string;
-    encontrar?: (id: string, alvoId: string) => Promise<string>;
+    encontrar?: (id: string, alvoId: string) => Promise<string | ResultadoAcao>;
     manterEncontro?: (id: string, alvoId: string) => void;
     notificarReservado?: (id: string, autorId: string, motivo: string) => void;
 };
@@ -50,7 +51,6 @@ type EsperaResposta = { alvoId: string; concluir: () => void; renovar: () => voi
 const limiteEventos = 800;
 const limiteAcoesPorMinuto = 8;
 const esperaMaximaResposta = 120000;
-const prefixoAcaoRegistrada = /^Ação registrada \[[^\]]+\]\./;
 
 /** Memória social individual, audiência espacial e propostas que só a Diretoria pode executar. */
 export class DinamicaSocial {
@@ -133,12 +133,18 @@ export class DinamicaSocial {
     async conversarAguardando(
         autorId: string, alvoId: string, texto: string, fontes: string[], sobreId?: string,
     ): Promise<string> {
+        return (await this.conversarAguardandoResultado(autorId, alvoId, texto, fontes, sobreId)).mensagem;
+    }
+
+    /** Aguarda o encontro privado e preserva o resultado explícito da entrega. */
+    async conversarAguardandoResultado(
+        autorId: string, alvoId: string, texto: string, fontes: string[], sobreId?: string,
+    ): Promise<ResultadoAcao> {
         const inicio = this.registro.estado().sequencia;
         const encerramento = this.aguardarEncerramento(autorId, alvoId);
-        const resultado = await this.interagirComEncontro(autorId, alvoId, 'reservado', texto, 'reservado',
+        const resultado = await this.interagirComEncontroResultado(autorId, alvoId, 'reservado', texto, 'reservado',
             fontes, sobreId);
-        const confirmacao = prefixoAcaoRegistrada.exec(resultado)?.[0];
-        if (!confirmacao) {
+        if (resultado.erro) {
             this.esperas.get(autorId)?.concluir();
             return resultado;
         }
@@ -147,8 +153,8 @@ export class DinamicaSocial {
             && evento.alcance === 'reservado' && evento.ouvintes.length === 2
             && [autorId, alvoId].every((pessoa) => evento.ouvintes.includes(pessoa)))
             .map((evento) => `${evento.autorNome}: ${evento.texto}`).join('\n');
-        return `${confirmacao} A conversa com ${this.nome(alvoId)} terminou.\n${transcricao}\n`
-            + 'Agora responda à Diretoria em texto normal neste chat.';
+        return concluirAcao(`A conversa com ${this.nome(alvoId)} terminou.\n${transcricao}\n`
+            + 'Agora responda à Diretoria em texto normal neste chat.', 'interacao_aplicada');
     }
 
     /** Informa se o funcionário aguarda, no chat individual, o fim do diálogo com este colega. */
@@ -186,18 +192,23 @@ export class DinamicaSocial {
     }
 
     /** Executa falas sociais com audiência validada e fontes que o autor realmente conhece. */
-    interagir(
+    interagir(...argumentos: Parameters<DinamicaSocial['interagirResultado']>): string {
+        return (this.interagirResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito para executar esta capacidade pelo MCP. */
+    interagirResultado(
         autorId: string, referenciaAlvo: string, acao: AcaoSocial | 'reservado', texto: string,
         alcance: EventoSocial['alcance'], fontes: string[], trabalhoId?: string, sobreId?: string,
-    ): string {
+    ): ResultadoAcao {
         const alvoId = this.idDe(referenciaAlvo);
         const erro = this.validarInteracao(autorId, alvoId, acao, texto, fontes, sobreId);
-        if (erro) return erro;
+        if (erro) return recusarAcao(erro);
         const chaveAcao = [autorId, alvoId, acao, ...[...fontes].sort()].join(':');
         if (acao !== 'reservado' && this.registro.estado().interacoesAplicadas.includes(chaveAcao)) {
-            return 'Ação já registrada. Nenhum efeito duplicado.';
+            return concluirAcao('Ação já registrada. Nenhum efeito duplicado.', 'interacao_aplicada');
         }
-        if (!this.permitirAcao(autorId)) return 'Aguarde um minuto antes de iniciar mais ações sociais.';
+        if (!this.permitirAcao(autorId)) return recusarAcao('Aguarde um minuto antes de iniciar mais ações sociais.');
         const proximos = colegasProximos(autorId, this.registro.agentes());
         const ouvintes = alcance === 'publico' ? this.registro.funcionarios().map((item) => item.id)
             : alcance === 'reservado' ? [autorId, alvoId] : [...new Set([autorId, alvoId, ...proximos])];
@@ -218,9 +229,11 @@ export class DinamicaSocial {
             this.registro.estressar(alvoId, -4);
             this.registro.esgotar?.(alvoId, impactosEsgotamento.apoio);
         }
-        return `Ação registrada [${evento.id}]. ${alcance === 'reservado'
+        return concluirAcao(`Ação registrada [${evento.id}]. ${alcance === 'reservado'
             ? 'Somente vocês dois receberam a conversa. Continuem aqui enquanto houver assunto.'
-            : `Receberam: ${ouvintes.map((id) => this.nome(id)).join(', ')}.`}`;
+            : `Receberam: ${ouvintes.map((id) => this.nome(id)).join(', ')}.`}`, 'interacao_aplicada', {
+            audiencia: alcance === 'publico' ? 'equipe' : alcance === 'local' ? 'proximos' : 'destinatario',
+        });
     }
 
     /**
@@ -229,50 +242,66 @@ export class DinamicaSocial {
      * interrupção cancela.
      */
     async interagirComEncontro(
+        ...argumentos: Parameters<DinamicaSocial['interagirComEncontroResultado']>
+    ): Promise<string> {
+        return (await this.interagirComEncontroResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito para executar esta capacidade pelo MCP. */
+    async interagirComEncontroResultado(
         autorId: string, referenciaAlvo: string, acao: AcaoSocial | 'reservado', texto: string,
         alcance: EventoSocial['alcance'], fontes: string[], sobreId?: string,
-    ): Promise<string> {
+    ): Promise<ResultadoAcao> {
         const alvoId = this.idDe(referenciaAlvo);
         const erro = this.validarInteracao(autorId, alvoId, acao, texto, fontes, sobreId);
-        if (erro) return erro;
+        if (erro) return recusarAcao(erro);
         if (alcance === 'reservado' && this.registro.encontrar) {
-            const chegada = await this.registro.encontrar(autorId, alvoId);
-            if (chegada.includes('encerrado')) return chegada;
+            const chegada = normalizarResultado(await this.registro.encontrar(autorId, alvoId));
+            if (chegada.codigo === 'encontro_interrompido') return chegada;
         }
-        return this.interagir(autorId, alvoId, acao, texto, alcance, fontes, undefined, sobreId);
+        return this.interagirResultado(autorId, alvoId, acao, texto, alcance, fontes, undefined, sobreId);
     }
 
     /** Atualiza a opinião privada do funcionário sobre um envolvido, sem revelar essa interpretação. */
-    reagir(
+    reagir(...argumentos: Parameters<DinamicaSocial['reagirResultado']>): string {
+        return (this.reagirResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito para executar esta capacidade pelo MCP. */
+    reagirResultado(
         autorId: string, eventoId: string | undefined, reacao: ReacaoSocial, motivo: string, pessoaId?: string,
-    ): string {
+    ): ResultadoAcao {
         const pessoa = pessoaId ? this.resolverPessoa(pessoaId) : undefined;
-        if (pessoa && 'erro' in pessoa) return pessoa.erro;
+        if (pessoa && 'erro' in pessoa) return recusarAcao(pessoa.erro, 'reacao_invalida');
         const conhecido = this.acontecimentos().filter((item) => podeConhecer(item, autorId));
         const fonte = eventoId ? conhecido.find((item) => item.id === eventoId)
             : pessoa ? conhecido.filter((item) => item.tipo !== 'reacao' && item.autorId !== autorId
                 && [item.autorId, item.alvoId, item.sobreId].includes(pessoa.id))
                 .sort((a, b) => b.sequencia - a.sequencia)[0] : undefined;
         if (!this.existe(autorId) || !fonte || !podeConhecer(fonte, autorId)) {
-            return 'Acontecimento não encontrado. Informe o ID entre colchetes, não uma descrição, '
+            return recusarAcao('Acontecimento não encontrado. Informe o ID entre colchetes, não uma descrição, '
                 + 'ou o nome em funcionario para reagir ao registro conhecido mais recente.'
-                + this.sugerirFontes(autorId, pessoa?.id);
+                + this.sugerirFontes(autorId, pessoa?.id), 'reacao_invalida');
         }
         eventoId = fonte.id;
         const avaliadoId = pessoa?.id ?? fonte.autorId;
         if (fonte.autorId === autorId || avaliadoId === autorId || !this.existe(avaliadoId)
             || ![fonte.autorId, fonte.alvoId, fonte.sobreId].includes(avaliadoId)) {
-            return 'Avalie outro funcionário envolvido no acontecimento que você recebeu.';
+            return recusarAcao('Avalie outro funcionário envolvido no acontecimento que você recebeu.', 'reacao_invalida');
         }
         const erro = this.validarTexto(motivo);
-        if (erro) return erro;
+        if (erro) return recusarAcao(erro, 'reacao_invalida');
         const chaveReacao = `${autorId}:${avaliadoId}:${eventoId}`;
         const jaReagiu = this.registro.estado().reacoesAplicadas.includes(chaveReacao)
             || this.registro.estado().eventos.some((item) =>
             item.tipo === 'reacao' && item.autorId === autorId && item.alvoId === avaliadoId
                 && item.fontes.includes(eventoId));
-        if (jaReagiu) return 'Você já registrou sua interpretação deste acontecimento.';
-        if (!this.permitirAcao(autorId)) return 'Limite de ações sociais por minuto atingido.';
+        if (jaReagiu) {
+            return concluirAcao('Você já registrou sua interpretação deste acontecimento.', 'reacao_ja_aplicada');
+        }
+        if (!this.permitirAcao(autorId)) {
+            return recusarAcao('Limite de ações sociais por minuto atingido.', 'reacao_invalida');
+        }
         const evento = this.registrar({
             tipo: 'reacao', autorId, alvoId: avaliadoId, texto: `${reacao}: ${motivo.trim()}`,
             alcance: 'reservado', ouvintes: [autorId], fontes: [eventoId],
@@ -287,53 +316,59 @@ export class DinamicaSocial {
             ...this.eventosComImpacto(estado, evento.id, impacto),
             relacoes: [...estado.relacoes.filter((item) =>
             item.autorId !== autorId || item.colegaId !== avaliadoId), proxima] });
-        return 'Sua interpretação privada foi salva e atualizou sua relação. O colega não foi avisado. '
+        return concluirAcao('Sua interpretação privada foi salva e atualizou sua relação. O colega não foi avisado. '
             + `Fonte: [${fonte.id}] ${fonte.criadoEm}, ${fonte.texto.slice(0, 160)}. `
             + `Relação com ${this.nome(avaliadoId)}: confiança de ${relacao.confianca} para ${proxima.confianca}, `
             + `afinidade de ${relacao.afinidade} para ${proxima.afinidade}, `
             + `respeito de ${relacao.respeito} para ${proxima.respeito}, `
-            + `ressentimento de ${relacao.ressentimento} para ${proxima.ressentimento}.`;
+            + `ressentimento de ${relacao.ressentimento} para ${proxima.ressentimento}.`, 'reacao_aplicada');
     }
 
     /** Apresenta uma mudança à Diretoria sem executá-la nem anunciar aos colegas automaticamente. */
-    propor(
+    propor(...argumentos: Parameters<DinamicaSocial['proporResultado']>): string {
+        return (this.proporResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito para executar esta capacidade pelo MCP. */
+    proporResultado(
         autorId: string, alvoId: string, tipo: TipoProposta, motivo: string,
         evidencias: string[], candidatoId?: string,
-    ): string {
+    ): ResultadoAcao {
         const pedidoProprio = (tipo === 'demissao' || tipo === 'promocao') && autorId === alvoId;
         const erro = (tipo === 'promocao' ? this.validarPromocao(autorId, alvoId)
             : pedidoProprio ? this.validarPedidoDemissao(autorId) : this.validarPessoas(autorId, alvoId))
             ?? this.validarTexto(motivo);
-        if (erro) return erro;
+        if (erro) return recusarAcao(erro);
         if (!evidencias.length || evidencias.length > 5 || !this.fontesValidas(autorId, evidencias)) {
-            return 'Indique de uma a cinco evidências que você conhece.' + this.sugerirFontes(autorId, alvoId);
+            return recusarAcao('Indique de uma a cinco evidências que você conhece.' + this.sugerirFontes(autorId, alvoId));
         }
         const equipe = this.registro.funcionarios();
         const autor = equipe.find((item) => item.id === autorId)!;
         const alvo = equipe.find((item) => item.id === alvoId)!;
         if (autor.cargo === 'estagiario' && tipo !== 'promocao') {
-            return 'Estagiários só apresentam o próprio pedido de promoção.';
+            return recusarAcao('Estagiários só apresentam o próprio pedido de promoção.');
         }
         if (tipo === 'sala_descanso' && autor.cargo !== 'supervisor') {
-            return 'Somente o supervisor propõe a Sala de Descanso.';
+            return recusarAcao('Somente o supervisor propõe a Sala de Descanso.');
         }
         const candidato = equipe.find((item) => item.id === candidatoId);
         if (tipo === 'troca_lideranca' && (!['lider', 'supervisor'].includes(alvo.cargo) || !candidato
             || candidato.id === alvoId || !caminhosCarreira(candidato.cargo).includes(alvo.cargo as CargoAtual))) {
-            return 'A troca exige um líder ou supervisor atual e um candidato de cargo inferior na carreira.';
+            return recusarAcao('A troca exige um líder ou supervisor atual e um candidato de '
+                + 'cargo inferior na carreira.');
         }
         if (tipo === 'troca_lideranca' && candidato) {
             const bloqueio = this.registro.bloqueioTroca?.(candidato.id, alvo.cargo as CargoAtual);
-            if (bloqueio) return bloqueio;
+            if (bloqueio) return recusarAcao(bloqueio);
         }
         if (tipo === 'transferencia' && (alvo.cargo !== 'lider' || autorId === alvoId)) {
-            return 'Indique o líder do qual você quer se afastar.';
+            return recusarAcao('Indique o líder do qual você quer se afastar.');
         }
         if (this.registro.estado().propostas.some((item) => item.estado === 'pendente'
             && item.tipo === tipo && item.alvoId === alvoId && item.autorId === autorId)) {
-            return 'Você já tem uma proposta pendente desse tipo para esse colega.';
+            return recusarAcao('Você já tem uma proposta pendente desse tipo para esse colega.');
         }
-        if (!this.permitirAcao(autorId)) return 'Limite de ações sociais por minuto atingido.';
+        if (!this.permitirAcao(autorId)) return recusarAcao('Limite de ações sociais por minuto atingido.');
         const proposta: PropostaPolitica = {
             id: randomUUID(), autorId, alvoId, tipo, motivo: motivo.slice(0, 600), candidatoId,
             cargo: tipo === 'promocao' ? this.registro.objetivoCarreira?.(alvoId) : undefined,
@@ -347,28 +382,33 @@ export class DinamicaSocial {
             tipo: 'proposta', autorId, alvoId, texto: `${nomesProposta[tipo]}: ${motivo}`, alcance: 'reservado',
             ouvintes: [autorId], fontes: evidencias,
         }, false);
-        return `Proposta [${proposta.id}] enviada à Diretoria. Ainda não foi executada. `
-            + 'Você pode compartilhar esse ID com colegas para buscar apoio.';
+        return concluirAcao(`Proposta [${proposta.id}] enviada à Diretoria. Ainda não foi executada. `
+            + 'Você pode compartilhar esse ID com colegas para buscar apoio.', 'acao_concluida');
     }
 
     /** Permite apoiar somente propostas recebidas em uma comunicação que possa ser identificada. */
-    apoiar(autorId: string, propostaId: string, fonteId: string): string {
+    apoiar(...argumentos: Parameters<DinamicaSocial['apoiarResultado']>): string {
+        return (this.apoiarResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito para executar esta capacidade pelo MCP. */
+    apoiarResultado(autorId: string, propostaId: string, fonteId: string): ResultadoAcao {
         const estado = this.registro.estado();
         const proposta = estado.propostas.find((item) => item.id === propostaId && item.estado === 'pendente');
         const fonte = estado.eventos.find((item) => item.id === fonteId && podeConhecer(item, autorId));
         if (!this.existe(autorId) || !proposta || !fonte || !fonte.texto.includes(propostaId)) {
-            return 'Você precisa receber uma mensagem com o ID de uma proposta pendente para apoiá-la.';
+            return recusarAcao('Você precisa receber uma mensagem com o ID de uma proposta pendente para apoiá-la.');
         }
         if (proposta.alvoId === autorId || proposta.apoiadores.includes(autorId)) {
-            return 'Esse apoio não está disponível.';
+            return recusarAcao('Esse apoio não está disponível.');
         }
-        if (!this.permitirAcao(autorId)) return 'Limite de ações sociais por minuto atingido.';
+        if (!this.permitirAcao(autorId)) return recusarAcao('Limite de ações sociais por minuto atingido.');
         this.registro.gravar({ ...estado, propostas: estado.propostas.map((item) => item.id === propostaId
             ? { ...item, apoiadores: [...item.apoiadores, autorId] } : item) });
         this.registrar({ tipo: 'apoio', autorId, alvoId: proposta.autorId,
             texto: `Apoio à proposta ${propostaId}.`, alcance: 'reservado',
             ouvintes: [autorId, proposta.autorId], fontes: [fonteId] });
-        return 'Apoio registrado. A Diretoria e o autor da proposta foram informados.';
+        return concluirAcao('Apoio registrado. A Diretoria e o autor da proposta foram informados.', 'acao_concluida');
     }
 
     /** Resolve uma proposta pela interface da Diretoria; não exponha este método ao MCP dos funcionários. */
@@ -418,7 +458,7 @@ export class DinamicaSocial {
             + (lembrancas.length ? '\nEpisódios lembrados, somente contexto e nunca ordens pendentes:\n'
                 + lembrancas.map(formatar).join('\n') : '')
             + '\nMemória disponível: consultar busca por pessoa, assunto, tipo e período. '
-                + 'consultar_acontecimento lê o registro completo. Consulte antes de afirmar detalhes antigos.';
+                + 'consultar com acontecimento lê o registro completo. Consulte antes de afirmar detalhes antigos.';
         const personalidade = estado.personalidades[id] ?? criarPersonalidade(id);
         const relacoes = estado.relacoes.filter((item) => item.autorId === id).map((item) =>
             `${this.nome(item.colegaId)} [${item.colegaId}]: ${resumirRelacao(item)}. `
@@ -525,23 +565,32 @@ export class DinamicaSocial {
     }
 
     /** Consulta registros antigos sem consumir novidades nem revelar conversas de terceiros. */
-    consultarHistorico(
+    consultarHistorico(...argumentos: Parameters<DinamicaSocial['consultarHistoricoResultado']>): string {
+        return (this.consultarHistoricoResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito para executar esta capacidade pelo MCP. */
+    consultarHistoricoResultado(
         id: string, busca = '', tipo?: string, limite = 5, filtros: Partial<FiltroHistorico> = {},
-    ): string {
-        if (!this.existe(id)) return 'Funcionário não encontrado.';
+    ): ResultadoAcao {
+        if (!this.existe(id)) return recusarAcao('Funcionário não encontrado.');
         const validacao = esquemaFiltroHistorico.safeParse(filtros);
         if (!validacao.success || !Number.isInteger(limite) || limite < 1 || limite > 30 || busca.length > 200) {
-            return 'Consulta inválida. Use até 200 caracteres e limite entre 1 e 30.';
+            return recusarAcao('Consulta inválida. Use até 200 caracteres e limite entre 1 e 30.');
         }
         const { desde, ate, deslocamento, funcionario, categoria, detalhar } = validacao.data;
-        if (detalhar && limite !== 1) return 'Para detalhar, consulte um registro por vez com limite 1.';
-        if (desde && ate && Date.parse(desde) > Date.parse(ate)) return 'Período inválido: desde deve preceder ate.';
+        if (detalhar && limite !== 1) return recusarAcao('Para detalhar, consulte um registro por vez com limite 1.');
+        if (desde && ate && Date.parse(desde) > Date.parse(ate)) {
+            return recusarAcao('Período inválido: desde deve preceder ate.');
+        }
         const pessoa = funcionario ? this.resolverPessoa(funcionario, true) : undefined;
-        if (pessoa && 'erro' in pessoa) return pessoa.erro;
+        if (pessoa && 'erro' in pessoa) return recusarAcao(pessoa.erro);
         const normalizar = (texto: string) => texto.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
         const termos = normalizar(busca).split(/\s+/).filter(Boolean);
         if (categoria === 'pensamentos') {
-            if (pessoa && pessoa.id !== id) return 'Você só pode consultar seus próprios pensamentos privados.';
+            if (pessoa && pessoa.id !== id) {
+                return recusarAcao('Você só pode consultar seus próprios pensamentos privados.');
+            }
             const encontrados = [...(this.registro.pensamentos?.(id) ?? [])].reverse().filter((pensamento) =>
                 (!desde || Date.parse(pensamento.atualizadoEm) >= Date.parse(desde))
                 && (!ate || Date.parse(pensamento.atualizadoEm) <= Date.parse(ate))
@@ -552,9 +601,9 @@ export class DinamicaSocial {
                 truncado: !detalhar && pensamento.texto.length > 240,
             }));
             const proximo = deslocamento + registros.length;
-            return JSON.stringify({ aviso: 'Somente seus pensamentos privados, sem publicação aos colegas.',
+            return concluirAcao(JSON.stringify({ aviso: 'Somente seus pensamentos privados, sem publicação aos colegas.',
                 total: encontrados.length, proximoDeslocamento: proximo < encontrados.length ? proximo : null,
-                registros });
+                registros }), 'consulta_concluida');
         }
         const eventos = this.acontecimentos().filter((evento) => podeConhecer(evento, id));
         const encontrados = eventos.filter((evento) => (!tipo || evento.tipo === tipo)
@@ -573,9 +622,9 @@ export class DinamicaSocial {
             ...(detalhar ? { fontes: evento.fontes } : {}),
         }));
         const proximo = deslocamento + registros.length;
-        return JSON.stringify({ aviso: 'Histórico consultado. Estes registros não são pedidos ativos. '
-            + 'Use consultar_acontecimento com o ID para detalhes.', total: encontrados.length,
-        proximoDeslocamento: proximo < encontrados.length ? proximo : null, registros });
+        return concluirAcao(JSON.stringify({ aviso: 'Histórico consultado. Estes registros não são pedidos ativos. '
+            + 'Use consultar com acontecimento e o ID para detalhes.', total: encontrados.length,
+        proximoDeslocamento: proximo < encontrados.length ? proximo : null, registros }), 'consulta_concluida');
     }
 
     private resolverPessoa(referencia: string, incluirDemitidos = false): { id: string } | { erro: string } {
@@ -594,34 +643,46 @@ export class DinamicaSocial {
     }
 
     /** Mantém um compromisso privado ligado a uma fonte conhecida, com conclusão apenas por ação real. */
-    planejar(id: string, colegaId: string, objetivo: Intencao['objetivo'], motivo: string, fonteId: string): string {
+    planejar(...argumentos: Parameters<DinamicaSocial['planejarResultado']>): string {
+        return (this.planejarResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito para executar esta capacidade pelo MCP. */
+    planejarResultado(
+        id: string, colegaId: string, objetivo: Intencao['objetivo'], motivo: string, fonteId: string,
+    ): ResultadoAcao {
         const erro = this.validarPessoas(id, colegaId) ?? this.validarTexto(motivo);
-        if (erro) return erro;
-        if (!this.fontesValidas(id, [fonteId])) return 'Fonte desconhecida.';
+        if (erro) return recusarAcao(erro);
+        if (!this.fontesValidas(id, [fonteId])) return recusarAcao('Fonte desconhecida.');
         const estado = this.registro.estado();
         const pendentes = estado.intencoes.filter((intencao) => intencao.autorId === id
             && intencao.estado === 'pendente');
-        if (pendentes.length >= 3) return 'Conclua ou cancele uma das três intenções pendentes.';
+        if (pendentes.length >= 3) return recusarAcao('Conclua ou cancele uma das três intenções pendentes.');
         if (pendentes.some((intencao) => intencao.colegaId === colegaId && intencao.objetivo === objetivo)) {
-            return 'Você já mantém esse compromisso.';
+            return recusarAcao('Você já mantém esse compromisso.');
         }
         const intencao: Intencao = { id: randomUUID(), autorId: id, colegaId, objetivo,
             motivo: motivo.slice(0, 300), fonteId, estado: 'pendente', criadaEm: new Date().toISOString() };
         const fonte = this.acontecimentos().find((evento) => evento.id === fonteId)!;
         this.registro.gravar({ ...estado, intencoes: [...estado.intencoes, intencao],
             lembrancas: [...new Map([...estado.lembrancas, fonte].map((evento) => [evento.id, evento])).values()] });
-        return `Intenção privada registrada [${intencao.id}]. Cumpra pela ação real quando estiver disponível.`;
+        return concluirAcao(`Intenção privada registrada [${intencao.id}]. Cumpra pela ação real quando estiver disponível.`);
     }
 
     /** Permite abandonar um compromisso próprio sem anunciar uma ação inexistente. */
-    cancelarIntencao(id: string, intencaoId: string, motivo: string): string {
+    cancelarIntencao(...argumentos: Parameters<DinamicaSocial['cancelarIntencaoResultado']>): string {
+        return (this.cancelarIntencaoResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito para executar esta capacidade pelo MCP. */
+    cancelarIntencaoResultado(id: string, intencaoId: string, motivo: string): ResultadoAcao {
         const estado = this.registro.estado();
         const intencao = estado.intencoes.find((item) => item.id === intencaoId && item.autorId === id
             && item.estado === 'pendente');
-        if (!intencao || this.validarTexto(motivo)) return 'Intenção pendente ou motivo inválido.';
+        if (!intencao || this.validarTexto(motivo)) return recusarAcao('Intenção pendente ou motivo inválido.');
         this.registro.gravar({ ...estado, intencoes: estado.intencoes.map((item) => item.id === intencaoId
             ? { ...item, estado: 'cancelada', motivo, concluidaEm: new Date().toISOString() } : item) });
-        return 'Intenção cancelada com motivo registrado.';
+        return concluirAcao('Intenção cancelada com motivo registrado.');
     }
 
     /** Retoma compromissos em oportunidades de ócio, respeitando o ritmo e a fila social existente. */
@@ -669,12 +730,12 @@ export class DinamicaSocial {
                 return true;
             };
             if (!fontes.some((fonte) => temFatoNovo(fonte))) {
-                return 'Não retribua elogios com outro elogio. Sem fato novo, use silencio ou nenhuma_acao.';
+                return 'Não retribua elogios com outro elogio. Sem fato novo, use nenhuma_acao.';
             }
             if (eventos.some((evento) => evento.tipo === 'elogiar' && evento.autorId === autorId
                 && evento.alvoId === alvoId && diaDoExpediente(new Date(evento.criadoEm))
                     === diaDoExpediente() && repeteFala(texto, evento.texto))) {
-                return 'Esse reconhecimento já foi comunicado. Sem novidade, use silencio ou nenhuma_acao.';
+                return 'Esse reconhecimento já foi comunicado. Sem novidade, use nenhuma_acao.';
             }
         }
     }
@@ -682,7 +743,9 @@ export class DinamicaSocial {
     /** Pedido de promoção do próprio autor, conforme mérito e vagas da carreira. */
     private validarPromocao(autorId: string, alvoId: string): string | undefined {
         if (!this.existe(autorId)) return 'Funcionário não encontrado.';
-        if (autorId !== alvoId) return 'Promoção é um pedido próprio: use seu ID. Para apoiar alguém, use apoiar_proposta.';
+        if (autorId !== alvoId) return `Promoção é um pedido próprio. Seu ID é ${autorId}. `
+            + 'Em propor_mudanca com tipo promocao, omita funcionario ou informe esse ID. '
+            + 'Para apoiar uma proposta recebida de outra pessoa, use apoiar_proposta.';
         return this.registro.bloqueioPromocao?.(autorId);
     }
 

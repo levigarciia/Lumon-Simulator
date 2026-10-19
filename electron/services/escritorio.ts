@@ -1,3 +1,6 @@
+import { ferramentasDisponiveis } from '../../shared/ferramentas';
+import { encontrarArquivoDisponivel, recuperarPeriodosRefinamento } from '../../shared/fluxoRefinamento';
+import { concluirAcao, recusarAcao, type ResultadoAcao } from './ferramentas/resultado';
 import { preservarLembrancas } from '../../shared/memoria';
 import {
     apagarConversaHistorica, excluirArquivosWork, excluirHistoricoCompleto, excluirRegistros, listarHistorico,
@@ -9,7 +12,8 @@ import { custoConserto, registrarUso, repararItem } from '../../shared/manutenca
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { gerarArquivo, descreverGrade, refinar, problemaSelecao, progressoRefinamento, recompensaRefinamento,
-    nomeProjetoMacrodados, orientarRefinamento, descreverEnvios, formatarPrazo, type Temperamento } from '../../shared/refinamento';
+    nomeProjetoMacrodados, orientarRefinamento, descreverEnvios, formatarPrazo, registrarRecusa,
+    type Temperamento, type ArquivoRefinamento } from '../../shared/refinamento';
 import {
     catalogo,
     comItem,
@@ -52,8 +56,8 @@ import { SimulacaoEscritorio } from './simulacao';
 import { Orquestracao } from './orquestracao';
 import { DinamicaSocial } from './social';
 import {
-    criarPersonalidade, esquemaSocial, ferramentasConversaNaPausa, podeConhecer,
-    type EventoSocial, type PropostaPolitica,
+    criarPersonalidade, esquemaSocial, esquemaPensamento, ferramentasConversaNaPausa, podeConhecer,
+    type EventoSocial, type PropostaPolitica, type InterpretacaoPensamento,
 } from '../../shared/social';
 import type { RegistroTrabalho } from '../../shared/trabalho';
 
@@ -63,10 +67,6 @@ const sucesso: Resultado = { ok: true };
 const intervaloIniciativaMs = 120000;
 const limiteSelecoesRecusadasDelegado = 3;
 const limiteSelecoesRecusadasLider = 6;
-const ferramentasDoRefinamento = [
-    'delegar', 'cancelar_delegacao', 'abrir_arquivo', 'refinar', 'falar_com_responsavel', 'revisar_trabalho',
-    'pedir_refazer',
-];
 const prefixoRelatoChat ='Relato da Diretoria no chat individual, não verificado: ';
 
 const rotulosStatus: Record<StatusFuncionario, string> = {
@@ -97,6 +97,7 @@ export class Escritorio {
     private agenda: AgendaDepartamento;
     private ultimasIniciativas = new Map<string, number>();
     private selecoesRecusadas = new Map<string, number>();
+    private entradasWork = new Map<string, string>();
 
     constructor(
         private estado: EstadoSalvo,
@@ -146,110 +147,106 @@ export class Escritorio {
                             ferramenta: { ...evento.parte.ferramenta, estado: 'recusada' as const } },
                     } : evento),
             } : item);
+        this.estado.trabalhos = recuperarPeriodosRefinamento(this.estado.trabalhos, this.estado.refinamentos);
         if (JSON.stringify(this.estado) !== JSON.stringify(estado)) this.salvar(this.estado);
         this.mcp = new ServidorMcp({
+            autorizarFerramenta: (id, origem) => {
+                if (this.entradasWork.has(id)) return 'Sua entrada no Work já encerrou este turno.';
+                if (origem === 'trabalho' && this.orquestracao.saindo(id)) return 'Você já saiu do Work neste turno.';
+            },
             estadoEtapa: (id) => this.estadoEtapa(id),
-            autorizarFerramenta: (id, origem, nome) => {
-                if (!this.buscarFuncionario(id)) return 'Funcionário ausente.';
-                if (origemSocial(origem) && this.simulacao.emPausaNoItem(id)) {
-                    const conversaNaPausa = origem === 'reservado' && !!this.simulacao.parceiroDePausa(id);
-                    if (!conversaNaPausa || !ferramentasConversaNaPausa.includes(nome)) {
-                        return 'Durante a pausa, só é permitido conversar em particular com quem divide o item.';
-                    }
-                }
+            contextoFerramentas: (id, origem) => {
                 const ausencia = this.simulacao.ausenciaDe(id);
-                if (ausencia && !conversaDuranteAusencia(ausencia.motivo)) return `Você está fora da sala (${nomesAusencia[ausencia.motivo].toLowerCase()}).`;
-                if (origem === 'trabalho' && !['revisar_trabalho', 'ver_escritorio', 'consultar'].includes(nome)
-                    && !this.arquivoAtivo(id)) return 'Nenhum refinamento ativo.';
-                const refinando = !!this.arquivoAtivo(id);
-                if (origem === 'trabalho' && refinando && !ferramentasDoRefinamento.includes(nome)) {
-                    return 'Durante o refinamento, use apenas as ferramentas do Work.';
-                }
-                if (origemSocial(origem) && refinando) {
-                    return 'Você está refinando no Work. Conclua a etapa antes de outras ações.';
-                }
-                if (origem === 'trabalho' && this.estadoEtapa(id).terminal
-                    && !['abrir_arquivo', 'refinar', 'ver_escritorio', 'revisar_trabalho', 'consultar']
-                        .includes(nome)) {
-                    return 'Etapa encerrada. Resuma os resultados sem novas ações.';
-                }
-                if (origemSocial(origem) && this.geral.participacaoEncerrada(id)) {
-                    return 'Sua ação já encerrou a participação neste turno.';
-                }
-                if (origemSocial(origem) && this.geral.emReflexao(id) && !this.geral.atendeDiretoria(id)
-                    && !['ver_escritorio', 'consultar_acontecimento', 'consultar', 'atualizar_pensamento',
-                        'reagir_ao_acontecimento', 'conversar_reservado', 'nenhuma_acao', 'interagir_socialmente',
-                        'propor_mudanca', 'escolher_carreira'].includes(nome)) {
-                    return 'Essa ação não está disponível no turno de reação.';
-                }
+                return {
+                    cargo: this.buscarFuncionario(id)?.cargo,
+                    ausente: !this.buscarFuncionario(id) ? 'Funcionário ausente.'
+                        : ausencia && !conversaDuranteAusencia(ausencia.motivo)
+                            ? 'Você está fora da sala.' : undefined,
+                    emPausa: this.simulacao.emPausaNoItem(id),
+                    parceiroDePausa: !!this.simulacao.parceiroDePausa(id),
+                    refinando: !!this.arquivoAtivo(id),
+                    etapaEncerrada: origem === 'trabalho' && this.estadoEtapa(id).terminal,
+                    participacaoEncerrada: this.geral.participacaoEncerrada(id),
+                    reacao: this.geral.contextoReacao(id),
+                };
             },
-            consertarItem: (id, itemId) => this.consertarItem(id, itemId),
-            abrirArquivo: (id) => this.abrirArquivo(id),
-            refinar: (id, celulas, temperamento) => this.refinarArquivo(id, celulas, temperamento),
-            verEscritorio: (id) => this.descreverEscritorio(id),
-            fazerPausa: (id, atividade, minutos, origem) => this.fazerPausa(id, atividade, minutos, origem),
+            consertarItem: (id, itemId) => this.consertarItemResultado(id, itemId),
+            abrirArquivo: (id) => this.abrirArquivoResultado(id),
+            irParaWork: (id, origem) => this.irParaWork(id, origem),
+            invocarProWork: (id) => this.invocarProWork(id),
+            sairDoWork: (id, motivo) => this.sairDoWork(id, motivo),
+            refinar: (id, celulas, temperamento) => this.refinarArquivoResultado(id, celulas, temperamento),
+            verEscritorio: (id) => concluirAcao(this.descreverEscritorio(id), 'consulta_concluida'),
+            fazerPausa: (id, atividade, minutos, origem) => this.fazerPausaResultado(id, atividade, minutos, origem),
             falarNoGeral: (id, mensagem) => {
-                if (!this.buscarFuncionario(id)) return 'Funcionário não encontrado.';
-                return this.geral.falarDoAgente(id, mensagem);
+                if (!this.buscarFuncionario(id)) return recusarAcao('Funcionário não encontrado.');
+                return this.geral.falarDoAgenteResultado(id, mensagem);
             },
-            falarComResponsavel: (id, mensagem) => this.falarComResponsavel(id, mensagem),
-            atualizarPensamento: (id, pensamento) => this.atualizarPensamento(id, pensamento),
+            falarComResponsavel: (id, mensagem) => this.falarComResponsavelResultado(id, mensagem),
+            atualizarPensamento: (id, pensamento, interpretacao) =>
+                this.atualizarPensamentoResultado(id, pensamento, interpretacao),
             silenciar: (id) => this.geral.guardarSilencio(id),
+            encerrarVez: (id) => this.geral.registrarAcao(id, true),
             delegar: async (id, destino, tarefa) => {
                 const problema = this.problemaNaTarefaDelegada(id, tarefa);
-                if (problema) return `Delegação recusada: ${problema} Confira a grade em abrir_arquivo.`;
-                return this.orquestracao.delegar(id, destino, tarefa);
+                if (problema) return recusarAcao(`Delegação recusada: ${problema} Confira a grade em abrir_arquivo.`);
+                return this.orquestracao.delegarResultado(id, destino, tarefa);
             },
-            cancelarDelegacao: (id) => this.orquestracao.cancelarDelegacao(id),
+            cancelarDelegacao: (id) => this.orquestracao.cancelarDelegacaoResultado(id),
             interagir: async (id, referencia, acao, mensagem, alcance, fontes, sobreId, origem) => {
                 const destino = this.social.idDe(referencia);
                 if (this.simulacao.emPausaNoItem(destino) && alcance !== 'reservado') {
-                    return 'O colega está em pausa e indisponível no Geral. Converse somente em particular.';
+                    return recusarAcao('O colega está em pausa e indisponível no Geral. Converse somente '
+                        + 'em particular.');
                 }
                 const companhia = this.simulacao.parceiroDePausa(id);
                 if (companhia && (destino !== companhia || alcance !== 'reservado')) {
-                    return 'Durante a pausa, converse em particular somente com quem divide o item.';
+                    return recusarAcao('Durante a pausa, converse em particular somente com quem divide o item.');
                 }
                 if (origemSocial(origem) && this.geral.participacaoEncerrada(id)) {
-                    return 'Sua ação já encerrou a participação neste turno. Aguarde uma nova mensagem.';
+                    return recusarAcao('Sua ação já encerrou a participação neste turno. Aguarde uma nova mensagem.');
                 }
                 if (origemSocial(origem) && this.geral.emReflexao(id) && acao === 'cobrar'
                     && !this.geral.atendeDiretoria(id) && !this.disciplina(id)) {
-                    return 'Cobranças no turno de reação cabem à liderança. Você pode contestar ou dialogar com o colega.';
+                    return recusarAcao('Cobranças na reação cabem à liderança. Você pode contestar ou dialogar.');
                 }
                 const resultado = origem === 'chat' && acao === 'reservado'
-                    ? await this.social.conversarAguardando(id, destino, mensagem, fontes, sobreId)
-                    : await this.social.interagirComEncontro(id, destino, acao, mensagem, alcance, fontes, sobreId);
-                if (resultado.startsWith('Ação registrada [')) {
+                    ? await this.social.conversarAguardandoResultado(id, destino, mensagem, fontes, sobreId)
+                    : await this.social.interagirComEncontroResultado(id, destino, acao, mensagem, alcance, fontes, sobreId);
+                if (!resultado.erro) {
                     this.geral.registrarAcao(id, origemSocial(origem)
                         && (alcance === 'publico' || acao === 'cobrar' || acao === 'elogiar'));
                 }
                 return resultado;
             },
-            reagir: (id, evento, reacao, motivo, pessoaId) => this.social.reagir(id, evento, reacao, motivo, pessoaId),
-            escolherCarreira: (id, cargo) => this.escolherCarreira(id, cargo),
+            escolherCarreira: (id, cargo) => this.escolherCarreiraResultado(id, cargo),
             propor: (id, alvo, tipo, motivo, evidencias, candidato) =>
-                this.social.propor(id, alvo, tipo, motivo, evidencias, candidato),
-            apoiar: (id, proposta, fonte) => this.social.apoiar(id, proposta, fonte),
-            planejar: (id, colega, objetivo, motivo, fonte) => this.social.planejar(id, colega, objetivo, motivo, fonte),
-            cancelarIntencao: (id, intencao, motivo) => this.social.cancelarIntencao(id, intencao, motivo),
+                this.social.proporResultado(id, alvo, tipo, motivo, evidencias, candidato),
+            apoiar: (id, proposta, fonte) => this.social.apoiarResultado(id, proposta, fonte),
+            planejar: (id, colega, objetivo, motivo, fonte) =>
+                this.social.planejarResultado(id, colega, objetivo, motivo, fonte),
+            cancelarIntencao: (id, intencao, motivo) => this.social.cancelarIntencaoResultado(id, intencao, motivo),
             consultar: (id, eventoId) => {
                 const evento = this.social.acontecimentos().find((item) =>
                     item.id === eventoId && podeConhecer(item, id));
-                return evento ? JSON.stringify(evento, (chave, valor: unknown) =>
-                    chave === 'impactosRelacao' ? undefined : valor) : 'Acontecimento não disponível para você.';
+                return evento ? concluirAcao(JSON.stringify(evento, (chave, valor: unknown) =>
+                    chave === 'impactosRelacao' ? undefined : valor), 'consulta_concluida')
+                    : recusarAcao('Acontecimento não disponível para você.');
             },
             consultarHistorico: (id, busca, tipo, limite, filtros) =>
-                this.social.consultarHistorico(id, busca, tipo, limite, filtros),
-            revisar: (_id, trabalhoId) => this.revisarTrabalho(trabalhoId),
+                this.social.consultarHistoricoResultado(id, busca, tipo, limite, filtros),
+            revisar: (_id, trabalhoId) => this.revisarTrabalhoResultado(trabalhoId),
             validarEntrega: (id, validacao) => this.orquestracao.registrarValidacao(id, validacao),
-            refazer: (id, trabalho, motivo) => this.orquestracao.pedirRefazer(id, trabalho, motivo),
+            refazer: (id, trabalho, motivo) => this.orquestracao.pedirRefazerResultado(id, trabalho, motivo),
             incentivar: (id, tipo, motivo, alvo) => {
-                if (this.buscarFuncionario(id)?.cargo !== 'supervisor') return 'Somente o supervisor concede incentivos.';
+                if (this.buscarFuncionario(id)?.cargo !== 'supervisor') {
+                    return recusarAcao('Somente o supervisor concede incentivos.');
+                }
                 const resultado = this.pessoal.concederIncentivo(id, tipo, motivo, alvo);
-                return resultado.ok ? 'Incentivo concedido e anunciado à equipe.' : resultado.erro;
+                return resultado.ok ? concluirAcao('Incentivo concedido e anunciado à equipe.')
+                    : recusarAcao(resultado.erro);
             },
-            sessaoBemEstar: (id, alvo, mensagem) => this.pessoal.sessaoBemEstar(id, alvo, mensagem),
+            sessaoBemEstar: (id, alvo, mensagem) => this.pessoal.sessaoBemEstarResultado(id, alvo, mensagem),
             cargo: (id) => this.buscarFuncionario(id)?.cargo,
         });
         this.expediente = new Expediente({
@@ -263,17 +260,50 @@ export class Escritorio {
             contextoTurno: (id) => this.contextoTurno(id),
             confirmarPercepcao: (id, canal) => this.social.confirmarLeitura(id, canal),
             personalidade: (id) => this.social.personalidade(id),
-            ferramentasTrabalho: (id) => this.arquivoAtivo(id) ? [...ferramentasDoRefinamento] : undefined,
+            ferramentasTrabalho: (id) => ferramentasDisponiveis('trabalho', { cargo: this.buscarFuncionario(id)?.cargo,
+                refinando: !!this.arquivoAtivo(id), etapaEncerrada: this.estadoEtapa(id).terminal }),
             urlMcp: (id, origem) => this.mcp.urlDe(id, origem),
             acontecer: (id, acontecimento) => this.simulacao.registrar(id, acontecimento),
-            conversaEncerrada: (id) => this.liberarEncontroOcioso(id),
+            conversaEncerrada: (id, interrompida) => {
+                this.liberarEncontroOcioso(id);
+                if (interrompida) this.entradasWork.delete(id);
+                else this.entrarNoWork(id);
+            },
             pastaConversa: pastaGeral,
         });
         this.orquestracao = new Orquestracao({
+            duracaoRefinamento: (id) => this.estado.refinamentos[id]!.duracaoMinutos,
+            refinamentoCompleto: (id) => {
+                const arquivo = this.estado.refinamentos[id];
+                return !!arquivo && progressoRefinamento(arquivo) === 100;
+            },
+            aoLiberar: (id, arquivoId) => {
+                if (!arquivoId) return;
+                this.concluirArquivo(arquivoId);
+                if (!this.simulacao.emPausa(id)) this.geral.avisarEstado(id);
+            },
+            resumirRefinamento: (trabalho) => {
+                const arquivo = trabalho.arquivoId ? this.estado.refinamentos[trabalho.arquivoId] : undefined;
+                if (!arquivo) return 'Arquivo de refinamento indisponível. Nenhum resultado confirmado.';
+                const envios = trabalho.solicitante?.id
+                    ? arquivo.envios.filter((envio) => envio.trabalhoId === trabalho.id) : arquivo.envios;
+                return `Resultado verificado do arquivo ${arquivo.nome}. `
+                    + `Progresso: ${progressoRefinamento(arquivo)}%.\n`
+                    + descreverEnvios({ ...arquivo, envios });
+            },
             funcionarios: () => this.estado.funcionarios,
             projetos: () => this.estado.projetos,
             trabalhos: () => this.estado.trabalhos,
-            gravar: (trabalhos) => this.atualizar({ trabalhos }),
+            gravar: (trabalhos) => {
+                const refinamentos = { ...this.estado.refinamentos };
+                for (const trabalho of trabalhos) {
+                    if (!trabalho.arquivoId || !trabalho.prazo || trabalho.estado !== 'trabalhando'
+                        || this.estado.trabalhos.some((item) => item.id === trabalho.id)) continue;
+                    const arquivo = refinamentos[trabalho.arquivoId];
+                    if (arquivo) refinamentos[arquivo.id] = { ...arquivo, prazo: trabalho.prazo };
+                }
+                this.atualizar({ trabalhos, refinamentos });
+            },
             status: (id) => this.simulacao?.emPausa(id) ? 'em_pausa' : this.expediente.statusDe(id),
             executar: (funcionario, projeto, tarefa, threadId, observar) => {
                 this.geral.dispensar(funcionario.id);
@@ -311,8 +341,9 @@ export class Escritorio {
                 const bonusCota = cumpriuCota ? bonusCotaDiaria : 0;
                 const recompensa = (arquivo ? recompensaRefinamento(arquivo)
                     : recompensaEntrega(trabalho.avaliacao.validacao!)) + bonusCota;
-                const participantes = new Set(this.estado.trabalhos.filter((item) =>
-                    item.pedidoId === trabalho.pedidoId).map((item) => item.funcionarioId));
+                const participantes = new Set(this.estado.trabalhos.filter((item) => arquivo
+                    ? item.arquivoId === arquivo.id : item.pedidoId === trabalho.pedidoId)
+                    .map((item) => item.funcionarioId));
                 for (const id of participantes) this.ajustarMerito(id, ganhosMerito.entregaAprovada);
                 this.atualizar({ moedas: this.estado.moedas + recompensa, cota,
                     trabalhos: this.estado.trabalhos.map((item) => item.id === trabalhoId ? {
@@ -389,7 +420,8 @@ export class Escritorio {
                     `Vocês dividem ${catalogo[item.tipo].nome} durante a pausa. `
                     + `Oportunidade de conversa à toa com ${colega.nome}: comente algo leve ou faça uma pergunta pessoal. `
                     + 'Considere sua relação com esse colega. Não cobre trabalho nem relate necessidades. '
-                    + 'A conversa é opcional e fica entre vocês, no próprio item, com a recuperação e o prazo mantidos.');
+                    + 'A conversa é opcional e fica entre vocês, no próprio item, com a '
+                        + 'recuperação e o prazo mantidos.');
             },
             aoEncerrarCompanhia: (id, colegaId) => this.geral.encerrarReservado(id, colegaId),
             sala: () => this.estado.sala,
@@ -426,7 +458,7 @@ export class Escritorio {
             demissoes: () => this.estado.demissoes,
             agentes: () => this.simulacao.agentes(),
             encontrar: (id, alvoId) => {
-                const retorno = this.simulacao.encontrarColega(id, alvoId);
+                const retorno = this.simulacao.encontrarColegaResultado(id, alvoId);
                 if (this.simulacao.emPausa(id) && this.simulacao.parceiroDePausa(id) !== alvoId) {
                     this.geral.pausaIniciada(id);
                 }
@@ -474,7 +506,7 @@ export class Escritorio {
             registrar: (evento, notificar) => this.social.registrar(evento, notificar),
             ajustarRelacao: (autorId, colegaId, eventoId, delta) =>
                 this.social.ajustarRelacao(autorId, colegaId, eventoId, delta),
-            conversarReservado: async (autorId, alvoId, texto) => this.social.interagir(autorId, alvoId,
+            conversarReservado: async (autorId, alvoId, texto) => this.social.interagirResultado(autorId, alvoId,
                 'reservado', texto.slice(0, 600), 'reservado', []),
         });
         this.agenda = new AgendaDepartamento({
@@ -482,14 +514,10 @@ export class Escritorio {
             funcionarios: () => this.estado.funcionarios,
             arquivos: () => Object.values(this.estado.refinamentos),
             eventos: () => [...this.estado.social.historico, ...this.estado.social.eventos],
-            podeReceberArquivo: () => !this.estado.trabalhos.some((item) => item.estado === 'trabalhando'
-                || item.avaliacao?.estado === 'aguardando_aprovacao')
-                && this.estado.funcionarios.some((pessoa) => pessoa.cargo === 'lider'
-                    && !this.impedimentoTrabalho(pessoa.id)
-                    && !this.simulacao.emPausa(pessoa.id)
-                    && !['trabalhando', 'bloqueado'].includes(this.expediente.statusDe(pessoa.id))),
+            podeReceberArquivo: () => !this.arquivoDisponivel()
+                && this.estado.funcionarios.some((pessoa) => refina(pessoa.cargo)),
             entregarArquivo: () => {
-                const resultado = this.iniciarRefinamento(duracaoArquivoDiretoriaMinutos);
+                const resultado = this.receberArquivo(duracaoArquivoDiretoriaMinutos);
                 if (!resultado.ok) return resultado;
                 const arquivo = Object.values(this.estado.refinamentos).at(-1)!;
                 return { ok: true, arquivoId: arquivo.id, nome: arquivo.nome, prazo: arquivo.prazo };
@@ -500,6 +528,11 @@ export class Escritorio {
             emitirEstado: () => this.publicar(),
         });
         this.geral = new CanalGeral({
+            aoEncerrarTurno: (id, interrompido) => {
+                if (interrompido) this.entradasWork.delete(id);
+                else this.entrarNoWork(id);
+            },
+            promessaRetida: (origem) => this.mcp.metricas.reterPromessa(origem),
             funcionarios: () => this.estado.funcionarios,
             mensagens: () => this.estado.geral,
             gravar: (mensagens) => {
@@ -591,9 +624,39 @@ export class Escritorio {
         return this.estado.geral;
     }
 
+    /** Consulta contadores técnicos da sessão, sem dar acesso ao conteúdo privado dos agentes. */
+    consultarMetricasFerramentas() {
+        return this.mcp.metricas.consultar();
+    }
+
     /** Inicia um arquivo de macrodados em uma pasta exclusiva do escritório. */
     iniciarRefinamento(minutos: number): Resultado {
         if (!Number.isInteger(minutos) || minutos < 1 || minutos > 60) return falha('Escolha de 1 a 60 minutos.');
+        if (this.estado.trabalhos.some((item) => item.arquivoId && item.estado === 'trabalhando')) {
+            return falha('Há agentes refinando o arquivo atual.');
+        }
+        const existente = this.arquivoDisponivel();
+        if (!existente) {
+            const recebido = this.receberArquivo(minutos);
+            if (!recebido.ok) return recebido;
+        }
+        const arquivo = this.arquivoDisponivel()!;
+        const anterior = arquivo.duracaoMinutos;
+        this.atualizar({ refinamentos: { ...this.estado.refinamentos,
+            [arquivo.id]: { ...arquivo, duracaoMinutos: minutos } } });
+        const projeto = this.projetoMacrodados();
+        const resultado = this.orquestracao.enviar(projeto.id, `Refine o arquivo ${arquivo.nome}.`,
+            threadPrincipal, undefined, arquivo.id);
+        if (!resultado.ok) {
+            const refinamentos = { ...this.estado.refinamentos };
+            if (!existente) delete refinamentos[arquivo.id];
+            else refinamentos[arquivo.id] = { ...arquivo, duracaoMinutos: anterior };
+            this.atualizar({ refinamentos });
+        }
+        return resultado;
+    }
+
+    private projetoMacrodados() {
         const pasta = join(this.pastaGeral, 'macrodados');
         mkdirSync(pasta, { recursive: true });
         let projeto = this.estado.projetos.find((item) => item.pasta === pasta);
@@ -601,18 +664,101 @@ export class Escritorio {
             projeto = { id: randomUUID(), nome: nomeProjetoMacrodados, pasta };
             this.atualizar({ projetos: [...this.estado.projetos, projeto] });
         }
+        return projeto;
+    }
+
+    private arquivoDisponivel() {
+        return encontrarArquivoDisponivel(this.estado.refinamentos, this.estado.trabalhos);
+    }
+
+    private receberArquivo(minutos: number): Resultado {
+        if (this.arquivoDisponivel()) return falha('Já existe um arquivo aguardando conclusão.');
+        this.projetoMacrodados();
         const arquivo = { ...gerarArquivo(Date.now(), new Date(Date.now() + minutos * 60000)),
             duracaoMinutos: minutos };
         this.atualizar({ refinamentos: { ...this.estado.refinamentos, [arquivo.id]: arquivo } });
-        const resultado = this.orquestracao.enviar(projeto.id,
-            `Refine o arquivo ${arquivo.nome}. Prazo: ${formatarPrazo(arquivo)}.`,
-            threadPrincipal, undefined, arquivo.id);
-        if (!resultado.ok) {
-            const refinamentos = { ...this.estado.refinamentos };
-            delete refinamentos[arquivo.id];
-            this.atualizar({ refinamentos });
+        return sucesso;
+    }
+
+    private irParaWork(id: string, origem: OrigemMcp): ResultadoAcao {
+        const arquivo = this.arquivoDisponivel();
+        if (!arquivo) return recusarAcao('Nenhum arquivo disponível para refinamento.');
+        const impedimento = this.impedimentoTrabalho(id);
+        if (impedimento) return recusarAcao(`Você não pode entrar no Work: ${impedimento}.`);
+        if (this.simulacao.emPausaNoItem(id) || this.simulacao.ausenciaDe(id)
+            || this.arquivoAtivo(id) || this.entradasWork.has(id)
+            || ['trabalhando', 'bloqueado'].includes(this.expediente.statusDe(id))
+                && !(origem === 'chat' && this.expediente.emConversa(id))) {
+            return recusarAcao('Termine a pausa ou a tarefa atual antes de entrar no Work.');
         }
-        return resultado;
+        this.entradasWork.set(id, arquivo.id);
+        this.geral.registrarAcao(id, true);
+        return concluirAcao(`Você decidiu refinar ${arquivo.nome}. O período começa ao terminar este turno.`,
+            'entrada_work_agendada', { terminal: true });
+    }
+
+    private invocarProWork(liderId: string): ResultadoAcao {
+        const lider = this.buscarFuncionario(liderId);
+        if (lider?.cargo !== 'lider') {
+            return recusarAcao('Somente o líder pode invocar a equipe para o Work.');
+        }
+        const trabalho = this.estado.trabalhos.findLast((item) => item.funcionarioId === liderId
+            && item.estado === 'trabalhando');
+        const arquivo = this.arquivoAtivo(liderId);
+        if (!trabalho || !arquivo || this.estadoEtapa(liderId).terminal) {
+            return recusarAcao('Entre no Work e mantenha um período ativo antes de invocar a equipe.');
+        }
+        const convocados: string[] = [];
+        for (const colega of this.estado.funcionarios) {
+            if (colega.id === liderId || this.impedimentoTrabalho(colega.id)
+                || this.simulacao.emPausa(colega.id) || this.geral.emExecucao(colega.id)
+                || this.simulacao.parceiroEncontro(colega.id) || this.entradasWork.has(colega.id)
+                || this.arquivoAtivo(colega.id)
+                || ['trabalhando', 'bloqueado'].includes(this.expediente.statusDe(colega.id))
+                || this.estado.social.afastamentos[colega.id]?.includes(liderId)) continue;
+            const resultado = this.orquestracao.enviar(trabalho.projetoId,
+                `${lider.nome} convocou você para refinar o arquivo ${arquivo.nome}. `
+                    + 'Confira os envios recentes da equipe antes de enviar um grupo.',
+                trabalho.threadId ?? threadPrincipal, undefined, arquivo.id, colega.id);
+            if (resultado.ok) convocados.push(colega.nome);
+        }
+        return concluirAcao(convocados.length
+            ? `Entraram no Work para refinar ${arquivo.nome} com você: ${convocados.join(', ')}.`
+            : 'Nenhum colega livre para entrar no Work agora.', 'equipe_convocada');
+    }
+
+    private entrarNoWork(id: string): void {
+        const arquivoId = this.entradasWork.get(id);
+        if (!arquivoId) return;
+        this.entradasWork.delete(id);
+        const arquivo = this.estado.refinamentos[arquivoId];
+        if (!arquivo || progressoRefinamento(arquivo) === 100 || this.impedimentoTrabalho(id)
+            || this.simulacao.emPausaNoItem(id) || this.simulacao.ausenciaDe(id)) return;
+        const parceiro = this.simulacao.parceiroEncontro(id);
+        if (parceiro) this.geral.encerrarReservado(id, parceiro);
+        const resultado = this.orquestracao.enviar(this.projetoMacrodados().id,
+            `Refine o arquivo ${arquivo.nome}. Seu contador recomeça neste período.`,
+            threadPrincipal, undefined, arquivo.id, id);
+        if (!resultado.ok) this.geral.notificar([id], `Sua entrada no Work não começou: ${resultado.erro}`);
+    }
+
+    private sairDoWork(id: string, motivo: string): ResultadoAcao {
+        const resultado = this.orquestracao.pausar(id, motivo);
+        if (!resultado.ok) return recusarAcao(resultado.erro);
+        return concluirAcao(`Você saiu do Work: ${motivo}. O arquivo foi preservado. `
+            + 'Você pode conversar no Geral e voltar quando decidir.', 'saida_work', { terminal: true });
+    }
+
+    private concluirArquivo(arquivoId: string): void {
+        const arquivo = this.estado.refinamentos[arquivoId];
+        if (!arquivo || progressoRefinamento(arquivo) < 100
+            || this.estado.trabalhos.some((item) => item.arquivoId === arquivoId && item.estado === 'trabalhando')) return;
+        const principal = this.estado.trabalhos.findLast((item) => item.arquivoId === arquivoId && !item.solicitante?.id);
+        if (!principal || principal.avaliacao?.estado !== 'pendente') return;
+        this.atualizar({ trabalhos: this.estado.trabalhos.map((item) => item.id === principal.id ? {
+            ...item, estado: 'concluido', resultado: `Arquivo ${arquivo.nome} refinado em 100%.\n${descreverEnvios(arquivo)}`,
+            avaliacao: { estado: 'aguardando_aprovacao', recompensa: 0 },
+        } : item) });
     }
 
     private arquivoAtivo(funcionarioId: string) {
@@ -624,7 +770,8 @@ export class Escritorio {
     private estadoEtapa(id: string): { codigo: string; terminal: boolean } {
         const arquivo = this.arquivoAtivo(id);
         if (!arquivo) return { codigo: 'sem_arquivo', terminal: true };
-        if (Date.now() >= Date.parse(arquivo.prazo)) return { codigo: 'prazo_encerrado', terminal: true };
+        if (this.orquestracao.saindo(id)) return { codigo: 'saida_work', terminal: true };
+        if (this.periodoEncerrado(id)) return { codigo: 'periodo_encerrado', terminal: true };
         if (progressoRefinamento(arquivo) === 100) return { codigo: 'arquivo_concluido', terminal: true };
         const trabalho = this.estado.trabalhos.findLast((item) => item.funcionarioId === id
             && item.estado === 'trabalhando');
@@ -635,15 +782,27 @@ export class Escritorio {
         return { codigo: terminou ? 'etapa_encerrada' : 'etapa_ativa', terminal: terminou };
     }
 
+    private periodoEncerrado(id: string): boolean {
+        const trabalho = this.estado.trabalhos.findLast((item) => item.funcionarioId === id
+            && item.estado === 'trabalhando');
+        const prazo = trabalho?.prazo ?? this.arquivoAtivo(id)?.prazo;
+        return !!prazo && Date.now() >= Date.parse(prazo);
+    }
+
     private esgotouSelecoes(trabalho: RegistroTrabalho): boolean {
         const limite = trabalho.solicitante?.id ? limiteSelecoesRecusadasDelegado : limiteSelecoesRecusadasLider;
         return (this.selecoesRecusadas.get(trabalho.id) ?? 0) >= limite;
     }
 
-    private recusarSelecao(trabalho: RegistroTrabalho, motivo: string): string {
+    private recusarSelecao(
+        trabalho: RegistroTrabalho, motivo: string, celulas: string[], temperamento: Temperamento,
+    ): string {
+        const arquivo = this.estado.refinamentos[trabalho.arquivoId!];
+        if (arquivo) this.atualizar({ refinamentos: { ...this.estado.refinamentos,
+            [arquivo.id]: registrarRecusa(arquivo, trabalho.funcionarioId, celulas, temperamento, trabalho.id) } });
         this.selecoesRecusadas.set(trabalho.id, (this.selecoesRecusadas.get(trabalho.id) ?? 0) + 1);
-        if (!this.esgotouSelecoes(trabalho)) return `Envio não registrado: ${motivo}`;
-        return `Envio não registrado: ${motivo} Você insistiu em seleções inválidas e sua etapa foi encerrada. `
+        if (!this.esgotouSelecoes(trabalho)) return `Seleção recusada e registrada: ${motivo}`;
+        return `Seleção recusada e registrada: ${motivo} Sua etapa foi encerrada por seleções inválidas. `
             + (trabalho.solicitante?.id ? 'Devolva ao líder o que foi testado.' : 'Resuma a entrega à Diretoria.');
     }
 
@@ -652,13 +811,30 @@ export class Escritorio {
         return funcionario ? limiteEnviosEtapa(funcionario.cargo) : 4;
     }
 
-    private abrirArquivo(funcionarioId: string): string {
+    private abrirArquivo(...argumentos: Parameters<Escritorio['abrirArquivoResultado']>): string {
+        return (this.abrirArquivoResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito desta capacidade para o MCP. */
+    private abrirArquivoResultado(funcionarioId: string): ResultadoAcao {
         const arquivo = this.arquivoAtivo(funcionarioId);
-        if (!arquivo) return 'Nenhum arquivo ativo neste turno.';
-        if (Date.now() >= Date.parse(arquivo.prazo)) return 'Prazo encerrado. Resuma a entrega.';
-        return `Arquivo ${arquivo.nome}. Prazo: ${formatarPrazo(arquivo)}. Progresso: ${progressoRefinamento(arquivo)}%.\n`
+        if (!arquivo) return recusarAcao('Nenhum arquivo ativo neste turno.');
+        if (this.periodoEncerrado(funcionarioId)) return recusarAcao('Período encerrado. O arquivo foi preservado.');
+        const trabalho = this.estado.trabalhos.findLast((item) => item.funcionarioId === funcionarioId
+            && item.estado === 'trabalhando');
+        const periodo = formatarPrazo({ prazo: trabalho?.prazo ?? arquivo.prazo });
+        return concluirAcao(`Arquivo ${arquivo.nome}. Período até ${periodo}. `
+            + `Progresso: ${progressoRefinamento(arquivo)}%.\n`
             + this.descreverCota() + '\n'
             + (progressoRefinamento(arquivo) === 100 ? 'Arquivo concluído. Resuma a entrega.\n' : '')
+            + this.contextoArquivoCompartilhado(arquivo));
+    }
+
+    private contextoArquivoCompartilhado(arquivo: ArquivoRefinamento): string {
+        const participantes = this.estado.trabalhos.filter((item) => item.arquivoId === arquivo.id
+            && item.estado === 'trabalhando' && !this.estadoEtapa(item.funcionarioId).terminal);
+        return `Participantes ativos agora: ${participantes.map((item) => item.nome).join(', ') || 'nenhum'}.\n`
+            + 'Os períodos são independentes. Confira a grade atual antes do próximo envio.\n'
             + descreverGrade(arquivo) + '\nEnvios recentes da equipe:\n' + descreverEnvios(arquivo);
     }
 
@@ -666,13 +842,21 @@ export class Escritorio {
      * Histórico legível de um pedido de Macrodados para `revisar_trabalho`. Sem ID válido, mostra o último pedido
      * principal e avisa quando não há nada em andamento, para o agente não procurar trabalho inexistente.
      */
-    private revisarTrabalho(trabalhoId?: string): string {
+    private revisarTrabalho(...argumentos: Parameters<Escritorio['revisarTrabalhoResultado']>): string {
+        return (this.revisarTrabalhoResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito desta capacidade para o MCP. */
+    private revisarTrabalhoResultado(trabalhoId?: string): ResultadoAcao {
         const principais = this.estado.trabalhos.filter((item) => item.arquivoId && !item.solicitante?.id);
         const pedido = trabalhoId ? this.estado.trabalhos.find((item) => item.id === trabalhoId) : undefined;
         const trabalho = pedido ?? principais.at(-1);
         const aviso = trabalhoId && !pedido
             ? `"${trabalhoId}" não é um ID de trabalho. Mostrando o último pedido de Macrodados.\n` : '';
-        if (!trabalho) return `${aviso}Nenhum arquivo de Macrodados foi iniciado ainda. ${this.situacaoTrabalho()}`;
+        if (!trabalho) {
+            return concluirAcao(`${aviso}Nenhum arquivo de Macrodados foi iniciado ainda. `
+                + `${this.descreverCota()} ${this.situacaoTrabalho()}`);
+        }
         const arquivo = trabalho.arquivoId ? this.estado.refinamentos[trabalho.arquivoId] : undefined;
         const etapas = this.estado.trabalhos.filter((item) => item.pedidoId === trabalho.pedidoId).map((item) =>
             `* ${item.nome} [${item.id}], ${item.estado}: ${item.tarefa.slice(0, 200)}`
@@ -680,72 +864,95 @@ export class Escritorio {
         const avaliacao = trabalho.avaliacao;
         const anteriores = principais.filter((item) => item.pedidoId !== trabalho.pedidoId).slice(-3)
             .map((item) => `[${item.id}] ${item.criadoEm}, ${item.avaliacao?.estado ?? item.estado}`);
-        return [
+        return concluirAcao([
             aviso + `Pedido [${trabalho.id}] de ${trabalho.criadoEm}: ${trabalho.estado}.`,
             ...(arquivo ? [`Arquivo ${arquivo.nome}, progresso ${progressoRefinamento(arquivo)}%.`] : []),
             `Avaliação da Diretoria: ${avaliacao ? avaliacao.estado : 'não registrada'}`
                 + `${avaliacao?.motivo ? `. Motivo: ${avaliacao.motivo}` : ''}.`,
+            this.descreverCota(),
             `Etapas:\n${etapas.join('\n')}`,
             ...(arquivo ? [`Envios:\n${descreverEnvios(arquivo)}`] : []),
             ...(anteriores.length ? [`Pedidos anteriores: ${anteriores.join('; ')}.`] : []),
             this.situacaoTrabalho(),
-        ].join('\n');
+        ].join('\n'));
     }
 
     /** Frase objetiva sobre o trabalho atual, repetida nas consultas para impedir cobranças sem arquivo. */
     private situacaoTrabalho(): string {
         const ativos = this.estado.trabalhos.filter((item) => item.estado === 'trabalhando');
-        if (ativos.length) {
-            return `Em andamento agora: ${ativos.map((item) => `${item.nome} [${item.id}]`).join(', ')}.`;
-        }
-        return 'Nenhum arquivo em andamento agora. Só a Diretoria inicia o próximo pelo Work; até lá não há '
-            + 'etapa para assumir, distribuir, cobrar ou revisar.';
+        const andamento = ativos.length
+            ? `Em andamento agora: ${ativos.map((item) => `${item.nome} [${item.id}]`).join(', ')}.`
+            : 'Nenhum arquivo em andamento agora.';
+        const arquivo = this.arquivoDisponivel();
+        return arquivo ? `${andamento} Arquivo disponível: ${arquivo.nome}, `
+            + `${progressoRefinamento(arquivo)}%. Você decide se quer ir_para_work, conversar ou descansar.`
+            : `${andamento} Aguarde a chegada de outro arquivo no Geral. `
+                + 'Até lá, conviva e cuide de si.';
     }
 
     private descreverCota(): string {
         const cota = cotaAtual(this.estado.cota);
-        return `Cota do departamento: ${cota.grupos}/${metaDiaria} grupos aprovados hoje. `
-            + comunicadoDiretoria(cota, true);
+        return `Cota do departamento: ${cota.grupos}/${metaDiaria} grupos aprovados hoje.`;
     }
 
     private problemaNaTarefaDelegada(liderId: string, tarefa: string): string | undefined {
         const arquivo = this.arquivoAtivo(liderId);
-        const celulas = tarefa.toUpperCase().match(/\b[A-H](?:10|[1-9])\b/g) ?? [];
-        if (!arquivo || celulas.length !== 3) return undefined;
+        const celulas = tarefa.toUpperCase().match(/\b[A-J][1-8]\b/g) ?? [];
+        if (!arquivo) return undefined;
+        if (celulas.length !== 3) return 'Informe as três células da etapa, como C4, D4 e E4, após consultar a grade.';
         return problemaSelecao(arquivo, celulas);
     }
 
-    private refinarArquivo(funcionarioId: string, celulas: string[], temperamento: Temperamento): string {
+    private refinarArquivo(...argumentos: Parameters<Escritorio['refinarArquivoResultado']>): string {
+        return (this.refinarArquivoResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito desta capacidade para o MCP. */
+    private refinarArquivoResultado(
+        funcionarioId: string, celulas: string[], temperamento: Temperamento,
+    ): ResultadoAcao {
         const arquivo = this.arquivoAtivo(funcionarioId);
-        if (!arquivo) return 'Nenhum arquivo ativo neste turno.';
-        if (Date.now() >= Date.parse(arquivo.prazo)) return 'Prazo encerrado. Resuma a entrega.';
+        if (!arquivo) return recusarAcao('Nenhum arquivo ativo neste turno.');
+        if (this.orquestracao.saindo(funcionarioId)) return recusarAcao('Você já saiu do Work neste turno.');
+        if (this.periodoEncerrado(funcionarioId)) return recusarAcao('Período encerrado. O arquivo foi preservado.');
         const trabalho = this.estado.trabalhos.findLast((item) => item.funcionarioId === funcionarioId
             && item.estado === 'trabalhando');
-        if (!trabalho) return 'Nenhum trabalho ativo neste turno.';
+        if (!trabalho) return recusarAcao('Nenhum trabalho ativo neste turno.');
         const anteriores = (arquivo.envios ?? []).filter((item) => item.trabalhoId === trabalho.id);
         const limite = this.limiteEnvios(funcionarioId);
         if (trabalho.solicitante?.id && (anteriores.length >= limite
             || anteriores.some((item) => item.resultado === 'aceito'))) {
-            return 'Sua etapa terminou. Devolva agora ao líder as células testadas, os resultados e as pendências.';
+            return recusarAcao('Sua etapa terminou. Devolva agora ao líder as células testadas, '
+                + 'os resultados e as pendências.');
         }
-        if (this.esgotouSelecoes(trabalho)) return 'Sua etapa foi encerrada por seleções inválidas. Resuma o resultado.';
+        if (this.esgotouSelecoes(trabalho)) {
+            return recusarAcao('Sua etapa foi encerrada por seleções inválidas. Resuma o resultado.');
+        }
+        const selecionadas = new Set(celulas.map((celula) => celula.trim().toUpperCase()));
+        const aceitoPorColega = arquivo.grupos.some((grupo) => grupo.refinadoPor
+            && grupo.refinadoPor !== funcionarioId && grupo.celulas.some((celula) => selecionadas.has(celula)));
+        if (aceitoPorColega) {
+            return concluirAcao('Outro colega já refinou células desta seleção. Nenhuma tentativa foi consumida.\n'
+                + this.contextoArquivoCompartilhado(arquivo), 'arquivo_atualizado');
+        }
         const problema = problemaSelecao(arquivo, celulas);
-        if (problema) return this.recusarSelecao(trabalho, problema);
+        if (problema) return recusarAcao(this.recusarSelecao(trabalho, problema, celulas, temperamento));
         const envio = refinar(arquivo, funcionarioId, celulas, temperamento, trabalho.id);
         if (envio.repetida) {
-            return this.recusarSelecao(trabalho, envio.repetida === 'aceita'
+            return recusarAcao(this.recusarSelecao(trabalho, envio.repetida === 'aceita'
                 ? 'esse grupo já foi aceito. Escolha outra região.'
-                : 'essas células já foram rejeitadas. Escolha uma seleção diferente.');
+                : 'essas células já foram rejeitadas. Escolha outra seleção.', celulas, temperamento));
         }
         this.atualizar({ refinamentos: { ...this.estado.refinamentos, [arquivo.id]: envio.arquivo } });
         if (envio.resultado === 'aceito') this.ajustarMerito(funcionarioId, ganhosMerito.grupoAceito);
         const enviosDaEtapa = envio.arquivo.envios.filter((item) => item.trabalhoId === trabalho.id).length;
         const etapaTerminou = trabalho.solicitante?.id
             && (enviosDaEtapa >= limite || envio.resultado === 'aceito');
-        return `Envio: ${envio.resultado}. Progresso: ${progressoRefinamento(envio.arquivo)}%. `
+        return concluirAcao(`Envio: ${envio.resultado}. Progresso: ${progressoRefinamento(envio.arquivo)}%. `
             + orientarRefinamento(envio.resultado)
             + (progressoRefinamento(envio.arquivo) === 100 ? ' Arquivo concluído. Resuma a entrega.'
-                : etapaTerminou ? ' Sua etapa terminou. Resuma e devolva ao líder para o próximo colega continuar.' : '');
+                : etapaTerminou ? ' Sua etapa terminou. Resuma e devolva ao líder para o próximo '
+                    + 'colega continuar.' : '') + '\n' + this.contextoArquivoCompartilhado(envio.arquivo));
     }
 
     adicionarProjeto(pasta: string): Resultado {
@@ -755,11 +962,11 @@ export class Escritorio {
     contratar(dados: Contratacao): Resultado {
         const mesasOcupadas = new Set(this.estado.funcionarios.map((funcionario) => funcionario.mesaId));
         const mesa = this.estado.sala.itens.find((item) => item.tipo === 'mesa' && !mesasOcupadas.has(item.id));
-        if (!mesa) return falha('Compre uma mesa livre antes de contratar.');
+        if (refina(dados.cargo) && !mesa) return falha('Compre uma mesa livre antes de contratar.');
         const funcionario: Funcionario = {
             ...dados,
             id: randomUUID(),
-            mesaId: mesa.id,
+            mesaId: refina(dados.cargo) ? mesa!.id : '',
             contratadoEm: new Date().toISOString(),
         };
         this.atualizar({ funcionarios: [...this.estado.funcionarios, funcionario], social: {
@@ -774,7 +981,8 @@ export class Escritorio {
 
     /**
      * Troca nome, cargo, modelo, aparência ou autonomia. Recusa durante uma tarefa e encerra as sessões do
-     * harness, para que o próximo turno já use a configuração nova. Mesa, necessidades e histórico ficam.
+     * harness, para que o próximo turno já use a configuração nova. Reatribui a mesa conforme o cargo e preserva
+     * necessidades e histórico.
      */
     editar(funcionarioId: string, dados: Contratacao): Resultado {
         const atual = this.buscarFuncionario(funcionarioId);
@@ -783,11 +991,18 @@ export class Escritorio {
         if (status === 'trabalhando' || status === 'bloqueado' || this.simulacao.emPausa(funcionarioId)) {
             return falha(`Espere ${atual.nome} terminar a tarefa atual para editar.`);
         }
+        const candidatos = this.estado.funcionarios.map((pessoa) => pessoa.id === funcionarioId
+            ? { ...pessoa, ...dados, cargo: cargoAtual(dados.cargo), autonomia: false } : pessoa);
+        const funcionarios = reconciliarMesas(candidatos, this.estado.sala);
+        const editado = funcionarios.find((pessoa) => pessoa.id === funcionarioId)!;
+        if (refina(editado.cargo) && !this.estado.sala.itens.some((item) =>
+            item.tipo === 'mesa' && item.id === editado.mesaId)) {
+            return falha('Compre uma mesa livre antes de escolher este cargo.');
+        }
         this.expediente.dispensar(funcionarioId);
         this.geral.dispensar(funcionarioId);
-        const editado: Funcionario = { ...atual, ...dados, cargo: cargoAtual(dados.cargo), autonomia: false };
         this.atualizar({
-            funcionarios: this.estado.funcionarios.map((funcionario) => (funcionario.id === funcionarioId ? editado : funcionario)),
+            funcionarios,
         });
         return sucesso;
     }
@@ -926,25 +1141,31 @@ export class Escritorio {
     }
 
     interromperTrabalho(threadId?: string, projetoId?: string): void {
-        this.orquestracao.interromper(threadId, projetoId);
+        this.orquestracao.interromper(threadId, projetoId, true);
     }
 
     /** Entrega uma iniciativa do líder à Diretoria, no máximo uma a cada dois minutos. */
-    private falarComResponsavel(funcionarioId: string, texto: string): string {
+    private falarComResponsavel(...argumentos: Parameters<Escritorio['falarComResponsavelResultado']>): string {
+        return (this.falarComResponsavelResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito desta capacidade para o MCP. */
+    private falarComResponsavelResultado(funcionarioId: string, texto: string): ResultadoAcao {
         const funcionario = this.buscarFuncionario(funcionarioId);
-        if (!funcionario) return 'Funcionário não encontrado.';
+        if (!funcionario) return recusarAcao('Funcionário não encontrado.');
         if (funcionario.cargo !== 'lider') {
-            return 'Somente o líder pode procurar a Diretoria. Encaminhe o assunto ao líder por conversar_reservado.';
+            return recusarAcao('Somente o líder pode procurar a Diretoria. Encaminhe o assunto ao '
+                + 'líder por conversar_reservado.');
         }
         const agora = Date.now();
         if (agora - (this.ultimasIniciativas.get(funcionarioId) ?? 0) < intervaloIniciativaMs) {
-            return 'Você acabou de escrever para a Diretoria. Aguarde a resposta antes de insistir.';
+            return recusarAcao('Você acabou de escrever para a Diretoria. Aguarde a resposta antes de insistir.');
         }
         this.ultimasIniciativas.set(funcionarioId, agora);
         this.expediente.registrarIniciativa(funcionarioId, texto.trim());
         const naoLidas = this.estado.naoLidas ?? {};
         this.atualizar({ naoLidas: { ...naoLidas, [funcionarioId]: (naoLidas[funcionarioId] ?? 0) + 1 } });
-        return 'Mensagem enviada à Diretoria no chat individual.';
+        return concluirAcao('Mensagem enviada à Diretoria no chat individual.');
     }
 
     /** Zera o indicador de mensagens por iniciativa quando a Diretoria abre o chat individual. */
@@ -957,10 +1178,21 @@ export class Escritorio {
     }
 
     /** Guarda a impressão privada do funcionário para ele e para a ficha consultada pela Diretoria. */
-    atualizarPensamento(funcionarioId: string, texto: string): string {
-        if (!this.buscarFuncionario(funcionarioId)) return 'Funcionário não encontrado.';
-        const pensamento = texto.trim();
-        if (!pensamento || pensamento.length > 600) return 'Use um pensamento entre 1 e 600 caracteres.';
+    atualizarPensamento(...argumentos: Parameters<Escritorio['atualizarPensamentoResultado']>): string {
+        return (this.atualizarPensamentoResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito desta capacidade para o MCP. */
+    atualizarPensamentoResultado(
+        funcionarioId: string, texto: string, interpretacao?: InterpretacaoPensamento,
+    ): ResultadoAcao {
+        if (!this.buscarFuncionario(funcionarioId)) return recusarAcao('Funcionário não encontrado.');
+        const dados = esquemaPensamento.safeParse({ ...interpretacao, pensamento: texto });
+        if (!dados.success) return recusarAcao(dados.error.issues[0]!.message, 'pensamento_invalido');
+        const { pensamento, reacao, acontecimento, funcionario } = dados.data;
+        const resultado = reacao
+            ? this.social.reagirResultado(funcionarioId, acontecimento, reacao, pensamento, funcionario) : undefined;
+        if (resultado?.erro) return resultado;
         const anterior = this.estado.pensamentos[funcionarioId];
         const historico = this.estado.historicoPensamentos[funcionarioId] ?? [];
         this.atualizar({ historicoPensamentos: { ...this.estado.historicoPensamentos,
@@ -968,7 +1200,11 @@ export class Escritorio {
             ...this.estado.pensamentos,
             [funcionarioId]: { id: randomUUID(), texto: pensamento, atualizadoEm: new Date().toISOString() },
         } });
-        return 'Pensamento privado salvo. Os colegas não recebem este registro. Não anuncie a atualização no Geral.';
+        return concluirAcao(
+            'Pensamento privado salvo. Os colegas não recebem este registro. '
+                + 'Não anuncie a atualização no Geral.' + (resultado ? `\n${resultado.mensagem}` : ''),
+            resultado?.codigo ?? 'pensamento_salvo',
+        );
     }
 
     limparGeral(): Resultado {
@@ -1137,8 +1373,13 @@ export class Escritorio {
     }
 
     /** Permite que um funcionário providencie o reparo sem cobrar novamente por um móvel já recuperado. */
-    consertarItem(funcionarioId: string, itemId: string): string {
-        if (!this.buscarFuncionario(funcionarioId)) return 'Funcionário não encontrado.';
+    consertarItem(...argumentos: Parameters<Escritorio['consertarItemResultado']>): string {
+        return (this.consertarItemResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito desta capacidade para o MCP. */
+    consertarItemResultado(funcionarioId: string, itemId: string): ResultadoAcao {
+        if (!this.buscarFuncionario(funcionarioId)) return recusarAcao('Funcionário não encontrado.');
         const normalizar = (valor: string) => valor.normalize('NFD').replace(/\p{M}/gu, '')
             .trim().replace(/\s+/g, ' ').toLowerCase();
         const referencia = normalizar(itemId);
@@ -1146,19 +1387,21 @@ export class Escritorio {
         const candidatos = porId ? [porId] : this.estado.sala.itens.filter((existente) =>
             normalizar(catalogo[existente.tipo].nome) === referencia || existente.tipo === referencia);
         if (candidatos.length > 1) {
-            return `Há mais de um móvel com esse nome. Use o ID: ${candidatos.map((item) => item.id).join(', ')}.`;
+            return recusarAcao(`Há mais de um móvel com esse nome. Use o ID: ${candidatos.map((item) => item.id).join(', ')}.`);
         }
         const item = candidatos[0];
-        if (!item) return 'Móvel não encontrado. Consulte ver_escritorio e use o ID de um conserto pendente.';
-        if (!item.quebrado) return 'Esse móvel não precisa de conserto.';
+        if (!item) {
+            return recusarAcao('Móvel não encontrado. Consulte ver_escritorio e use o ID de um conserto pendente.');
+        }
+        if (!item.quebrado) return concluirAcao('Esse móvel não precisa de conserto.', 'conserto_desnecessario');
         const custo = custoConserto(item);
-        if (this.estado.moedas < custo) return `Moedas insuficientes. O conserto custa ${custo} moedas.`;
+        if (this.estado.moedas < custo) return recusarAcao(`Moedas insuficientes. O conserto custa ${custo} moedas.`);
         this.atualizar({ moedas: this.estado.moedas - custo, sala: comItem(this.estado.sala, repararItem(item)) });
         this.social.registrar({ tipo: 'conserto', autorId: funcionarioId,
             texto: `${catalogo[item.tipo].nome} [${item.id}]: conserto providenciado por `
                 + `${this.buscarFuncionario(funcionarioId)!.nome}. Custo: ${custo} moedas do saldo compartilhado.`,
             alcance: 'publico', ouvintes: [], fontes: [] });
-        return `Conserto concluído. Foram pagas ${custo} moedas do escritório. O móvel está disponível.`;
+        return concluirAcao(`Conserto concluído. Foram pagas ${custo} moedas do escritório. O móvel está disponível.`);
     }
 
     private itensQuebrados(): string {
@@ -1196,6 +1439,7 @@ export class Escritorio {
 
     /** Interrompe execuções, conversas e o relógio. Chamado ao fechar o aplicativo. */
     encerrar(): void {
+        this.entradasWork.clear();
         this.orquestracao.interromper();
         for (const funcionario of this.estado.funcionarios) this.expediente.dispensar(funcionario.id);
         this.geral.encerrar();
@@ -1204,10 +1448,6 @@ export class Escritorio {
         this.mcp.encerrar();
     }
 
-    /**
-     * Pausa pedida pela ferramenta. A resposta sempre espera a volta, para o agente só comentar a pausa depois
-     * de fazê-la. No Geral, quem está no meio de uma tarefa precisa terminá-la antes.
-     */
     /**
      * Desfaz o encontro aberto por um turno do chat individual que terminou sem conversa reservada em andamento,
      * para que os dois não fiquem parados no canto nem bloqueiem o chat da Diretoria.
@@ -1219,23 +1459,39 @@ export class Escritorio {
     }
 
     private async fazerPausa(id: string, atividade: Atividade, minutos: number, origem: OrigemMcp): Promise<string> {
-        if (!origemSocial(origem)) return this.simulacao.pedirPausa(id, atividade, minutos);
+        return (await this.fazerPausaResultado(id, atividade, minutos, origem)).mensagem;
+    }
+
+    private async fazerPausaResultado(
+        id: string, atividade: Atividade, minutos: number, origem: OrigemMcp,
+    ): Promise<ResultadoAcao> {
+        if (origem === 'trabalho') {
+            if (!this.arquivoAtivo(id)) return recusarAcao('Nenhum refinamento ativo.');
+            const retorno = this.simulacao.pedirPausaResultado(id, atividade, minutos);
+            if (!this.simulacao.emPausaNoItem(id)) return retorno;
+            this.orquestracao.pausar(id, `Decidi descansar: ${atividade}.`);
+            void retorno;
+            return concluirAcao('Pausa iniciada. Você saiu do Work e o arquivo foi preservado. '
+                + 'Ao terminar o descanso, você decide quando retornar.', 'pausa_iniciada', { terminal: true });
+        }
+        if (!origemSocial(origem)) return this.simulacao.pedirPausaResultado(id, atividade, minutos);
         const status = this.expediente.statusDe(id);
         if ((status === 'trabalhando' && !this.expediente.emConversa(id)) || status === 'bloqueado') {
-            return 'Você está no meio de uma tarefa. Faça a pausa quando terminar, pelo próprio trabalho.';
+            return recusarAcao('Você está no meio de uma tarefa. Faça a pausa quando terminar, pelo próprio trabalho.');
         }
         if (this.simulacao.emPausaNoItem(id) || this.simulacao.ausenciaDe(id)) {
-            return 'Você já está em pausa.';
+            return recusarAcao('Você já está em pausa.');
         }
         if (this.simulacao.emPausa(id) && !this.simulacao.parceiroEncontro(id)) {
-            return 'Você já está em pausa.';
+            return recusarAcao('Você já está em pausa.');
         }
-        const retorno = this.simulacao.pedirPausa(id, atividade, minutos, origem === 'reservado');
+        const retorno = this.simulacao.pedirPausaResultado(id, atividade, minutos, origem === 'reservado');
         if (!this.simulacao.emPausa(id)) return retorno;
         this.geral.pausaIniciada(id);
         void retorno;
-        return `Pausa iniciada por ${minutos} minutos reais após chegar ao item. Sua vez terminou. `
-            + 'Você fica indisponível, exceto para conversar em particular com quem dividir o mesmo item.';
+        return concluirAcao(`Pausa iniciada por ${minutos} minutos reais após chegar ao item. Sua vez terminou. `
+            + 'Você fica indisponível, exceto para conversar em particular com quem dividir o mesmo item.',
+        'pausa_iniciada', { terminal: true });
     }
 
     /** Itens de pausa da sala com quantos estão livres e quem usa os demais, para ninguém imaginar fila. */
@@ -1289,6 +1545,8 @@ export class Escritorio {
         const pensamento = this.estado.pensamentos[funcionarioId]?.texto;
         const pedidos = pedidosDoCorpo(necessidades);
         const emPausa = this.simulacao.emPausaNoItem(funcionarioId);
+        const periodo = this.estado.trabalhos.findLast((item) => item.funcionarioId === funcionarioId
+            && item.arquivoId);
         return [
             contextoDiretoria,
             `Seu estado: ${resumirNecessidades(necessidades)}.`,
@@ -1299,6 +1557,9 @@ export class Escritorio {
             `Colegas: ${this.listarColegas(funcionarioId) || 'nenhum'}.`,
             `Itens de pausa: ${this.itensDePausa() || 'nenhum'}.`,
             this.contextoEquipe(funcionarioId),
+            this.situacaoTrabalho(),
+            ...(periodo?.estado === 'pausado' && periodo.avaliacao?.motivo
+                ? [`Sua última saída do Work: ${periodo.avaliacao.motivo} Você decide o que fazer agora.`] : []),
             this.contextoIntencoes(funcionarioId),
         ].join('\n');
     }
@@ -1348,7 +1609,9 @@ export class Escritorio {
             `Moedas do escritório: ${this.estado.moedas}.`,
             `Consertos pendentes: ${this.itensQuebrados() || 'nenhum'}.`,
             this.agenda.contextoTerminais(),
-            'Trabalho do departamento: exclusivamente refinamento de Macrodados. Arquivos são iniciados pelo Work.',
+            'Trabalho do departamento: exclusivamente refinamento de Macrodados. Arquivos chegam pelo Geral; '
+                + 'você decide quando entrar no Work. O contador recomeça em cada retorno.',
+            this.situacaoTrabalho(),
             this.contextoEquipe(funcionarioId, false),
             `Posições na sala:\n${this.listarPosicoes()}`,
         ].join('\n');
@@ -1399,19 +1662,24 @@ export class Escritorio {
             [id]: { ...atual, merito: aplicarMerito(atual?.merito ?? 0, delta) } } });
     }
 
-    private escolherCarreira(id: string, cargo: CargoAtual): string {
+    private escolherCarreira(...argumentos: Parameters<Escritorio['escolherCarreiraResultado']>): string {
+        return (this.escolherCarreiraResultado(...argumentos)).mensagem;
+    }
+
+    /** Retorna o resultado explícito desta capacidade para o MCP. */
+    private escolherCarreiraResultado(id: string, cargo: CargoAtual): ResultadoAcao {
         const pessoa = this.buscarFuncionario(id);
         if (!pessoa || cargo === 'estagiario' || !caminhosCarreira(pessoa.cargo).includes(cargo)) {
-            return 'Escolha um cargo imediatamente acessível a partir da sua função atual.';
+            return recusarAcao('Escolha um cargo imediatamente acessível a partir da sua função atual.');
         }
         if (this.estado.social.propostas.some((item) => item.estado === 'pendente'
             && ((item.alvoId === id && item.tipo === 'promocao') || item.candidatoId === id))) {
-            return 'Aguarde a decisão da proposta de carreira pendente antes de mudar seu objetivo.';
+            return recusarAcao('Aguarde a decisão da proposta de carreira pendente antes de mudar seu objetivo.');
         }
         const atual = this.estado.carreira[id];
         this.atualizar({ carreira: { ...this.estado.carreira,
             [id]: { ...atual, merito: atual?.merito ?? 0, objetivo: cargo } } });
-        return `Objetivo de carreira salvo: ${nomeCargo(cargo)}. A promoção exige mérito, vaga e decisão da Diretoria.`;
+        return concluirAcao(`Objetivo de carreira salvo: ${nomeCargo(cargo)}. A promoção exige mérito, vaga e decisão da Diretoria.`);
     }
 
     private bloqueioTroca(id: string, cargo: CargoAtual): string | undefined {
@@ -1566,6 +1834,12 @@ export class Escritorio {
     private registrarTrabalhoSocial(trabalho: RegistroTrabalho, tipo: 'delegacao' | 'entrega' | 'falha'): void {
         const delegacao = tipo === 'delegacao';
         const salvo = this.estado.trabalhos.find((item) => item.id === trabalho.id);
+        if (!delegacao && salvo?.estado === 'pausado') {
+            this.social.registrar({ tipo: 'comunicado', autorId: trabalho.funcionarioId,
+                trabalhoId: trabalho.id, alcance: 'publico', ouvintes: [], fontes: [],
+                texto: `${trabalho.nome} saiu do Work. O arquivo permanece disponível para continuação.` }, false);
+            return;
+        }
         const autorId = delegacao ? trabalho.solicitante?.id ?? 'diretoria' : trabalho.funcionarioId;
         const alvoId = delegacao ? trabalho.funcionarioId : trabalho.solicitante?.id;
         this.social.registrar({ tipo, autorId, alvoId, trabalhoId: trabalho.id,
@@ -1579,6 +1853,9 @@ export class Escritorio {
 
     private atualizar(mudanca: Partial<EstadoSalvo>): void {
         this.estado = { ...this.estado, ...mudanca };
+        if (mudanca.funcionarios) {
+            this.estado.funcionarios = reconciliarMesas(this.estado.funcionarios, this.estado.sala);
+        }
         this.salvar(this.estado);
         this.publicar();
     }

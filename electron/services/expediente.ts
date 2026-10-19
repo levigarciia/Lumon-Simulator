@@ -29,7 +29,7 @@ export type RegistroExpediente = {
     ferramentasTrabalho?: (funcionarioId: string) => string[] | undefined;
     urlMcp: (funcionarioId: string, origem: 'trabalho' | 'chat') => Promise<string>;
     acontecer: (funcionarioId: string, acontecimento: Acontecimento) => void;
-    conversaEncerrada?: (funcionarioId: string) => void;
+    conversaEncerrada?: (funcionarioId: string, interrompida: boolean) => void;
     confirmarPercepcao?: (funcionarioId: string, canal: 'social' | 'trabalho' | 'chat') => void;
     pastaConversa: string;
 };
@@ -256,10 +256,24 @@ export class Expediente {
         };
         return {
             texto: (completo) => alterar((mensagem) => {
-                if (!completo.startsWith(mensagem.texto)) throw new Error('O harness deve enviar texto cumulativo.');
-                const trecho = completo.slice(mensagem.texto.length);
-                if (!trecho) return mensagem;
+                if (completo === mensagem.texto) return mensagem;
+                let prefixo = mensagem.texto.length;
+                if (!completo.startsWith(mensagem.texto)) {
+                    prefixo = 0;
+                    while (prefixo < completo.length && completo[prefixo] === mensagem.texto[prefixo]) prefixo++;
+                }
                 const partes = [...mensagem.partes ?? []];
+                let retirar = mensagem.texto.length - prefixo;
+                for (let indice = partes.length - 1; indice >= 0 && retirar > 0; indice--) {
+                    const parte = partes[indice]!;
+                    if (parte.tipo !== 'texto') continue;
+                    const preservar = Math.max(0, parte.texto.length - retirar);
+                    retirar -= parte.texto.length - preservar;
+                    if (preservar) partes[indice] = { ...parte, texto: parte.texto.slice(0, preservar) };
+                    else partes.splice(indice, 1);
+                }
+                const trecho = completo.slice(prefixo);
+                if (!trecho) return { ...mensagem, texto: completo, partes };
                 const ultima = partes.at(-1);
                 if (!separarTexto && ultima?.tipo === 'texto') {
                     partes[partes.length - 1] = { ...ultima, texto: ultima.texto + trecho };
@@ -328,7 +342,6 @@ export class Expediente {
         const eraConversa = this.emConversa(funcionarioId);
         this.execucoes.delete(funcionarioId);
         this.canaisEmExecucao.delete(funcionarioId);
-        if (eraConversa) this.registro.conversaEncerrada?.(funcionarioId);
         const mensagemErro = interrompido ? mensagemInterrupcao
             : erro ? erro instanceof Error ? erro.message : String(erro) : undefined;
         this.alterarResposta(funcionarioId, respostaId, (mensagem) => ({
@@ -359,6 +372,7 @@ export class Expediente {
         this.observadores.delete(funcionarioId);
         const resposta = this.registro.conversa(funcionarioId).find((mensagem) => mensagem.id === respostaId);
         concluir?.({ ok: !mensagemErro, texto: mensagemErro ?? resposta?.texto ?? 'Turno concluído sem resposta.' });
+        if (eraConversa) this.registro.conversaEncerrada?.(funcionarioId, !!mensagemErro);
     }
 
     private alterarResposta(funcionarioId: string, respostaId: string, mudar: (mensagem: Mensagem) => Mensagem): void {

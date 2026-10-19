@@ -1,7 +1,9 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { z } from 'zod';
-import { anunciaAcao, anunciaPausa } from '../../../shared/geral';
+import { nomeCanonicoFerramenta, ehConsultaFerramenta } from '../../../shared/ferramentas';
+import { registrarPromessaRetida, registrarChamadaDescartada } from '../ferramentas/metricas';
+import { anunciaAcao, anunciaPausa, simulaChamadaFerramenta } from '../../../shared/geral';
 import { obterMotorLocal, type MotorLocal } from '../motor';
 import { lerRespostaLocal, type ChamadaLocal } from './respostaLocal';
 import { executarDecisoesSociais, instrucaoDecisaoSocial } from './decisaoSocial';
@@ -15,10 +17,6 @@ type MotorSessao = Pick<MotorLocal, 'usar'>;
 
 const esquemaEntrada = z.record(z.string(), z.unknown());
 
-/** Ferramentas cujo retorno o agente precisa ler antes de responder; as demais encerram uma resposta já escrita. */
-const ferramentasDeConsulta = new Set([
-    'ver_escritorio', 'consultar_acontecimento', 'consultar', 'revisar_trabalho',
-]);
 
 function juntarTextos(anterior: string, novo: string): string {
     return anterior.trim() && novo.trim() ? `${anterior}\n\n${novo}` : anterior + novo;
@@ -37,16 +35,17 @@ export function criarSessaoLocal(
         content: `Histórico salvo desta thread, apenas para contexto:\n${configuracao.historico}` });
     let cliente: Client | undefined;
     const nomesMcp = new Set<string>();
-    let ferramentas: FerramentaLocal[] | undefined;
     let enviando = false;
 
     async function conectar(sinal: AbortSignal): Promise<FerramentaLocal[]> {
-        if (ferramentas) return ferramentas;
         const lista: FerramentaLocal[] = [];
         if (configuracao.mcpUrl) {
-            const conexao = new Client({ name: 'lumon-local', version: '0.1.0' });
-            cliente = conexao;
-            await conexao.connect(new StreamableHTTPClientTransport(new URL(configuracao.mcpUrl)), { signal: sinal });
+            const conexao = cliente ?? new Client({ name: 'lumon-local', version: '0.1.0' });
+            if (!cliente) {
+                await conexao.connect(new StreamableHTTPClientTransport(new URL(configuracao.mcpUrl)), { signal: sinal });
+                cliente = conexao;
+            }
+            nomesMcp.clear();
             let cursor: string | undefined;
             do {
                 const pagina = await conexao.listTools({ cursor }, { signal: sinal });
@@ -58,7 +57,6 @@ export function criarSessaoLocal(
                 cursor = pagina.nextCursor;
             } while (cursor);
         }
-        ferramentas = lista;
         return lista;
     }
 
@@ -68,13 +66,14 @@ export function criarSessaoLocal(
         const resumo = nomesMcp.has(nome) ? `Escritório: ${nome}` : nome;
         ouvinte.iniciarFerramenta(chamada.id, resumo, argumentos);
         try {
-            if (!lista.some((item) => item.function.name === nome)) throw new Error('Ferramenta não autorizada.');
+            const canonico = nomeCanonicoFerramenta(nome);
+            if (!lista.some((item) => item.function.name === canonico)) throw new Error('Ferramenta não autorizada.');
             const entrada = esquemaEntrada.parse(JSON.parse(argumentos || '{}'));
             let saida: string;
             let erro = false;
             let terminal = false;
             let codigo: string | undefined;
-            if (nomesMcp.has(nome) && cliente) {
+            if (nomesMcp.has(canonico) && cliente) {
                 const resultado = await cliente.callTool({ name: nome,
                     arguments: entrada }, undefined, { signal: sinal, timeout: 3600000 });
                 saida = detalharFerramenta(resultado) ?? '';
@@ -108,15 +107,28 @@ export function criarSessaoLocal(
         let textoPublicado = '';
         const falhasRepetidas = new Map<string, number>();
         try {
-            const permitidas = opcoes.ferramentas;
+            const permitidas = opcoes.ferramentas?.map(nomeCanonicoFerramenta);
             const prioridade = (nome: string) => permitidas?.indexOf(nome) ?? 0;
             const lista = (await conectar(combinado))
                 .filter((item) => !permitidas || permitidas.includes(item.function.name))
                 .sort((a, b) => prioridade(a.function.name) - prioridade(b.function.name));
             if (configuracao.atividade === 'social') {
+                let previaSocial = '';
+                let textoSocialConfirmado = '';
+                const atualizarPreviaSocial = (texto: string) => {
+                    if (texto === previaSocial) return;
+                    previaSocial = texto;
+                    ouvinte.texto(texto);
+                };
                 await executarDecisoesSociais({
+                    promessaRetida: () => registrarPromessaRetida(configuracao.mcpUrl),
+                    chamadaDescartada: (nome) => registrarChamadaDescartada(configuracao.mcpUrl, nome),
                     somenteAcao: opcoes.exigirFerramenta,
-                    mensagens, ferramentas: lista, publicar: (texto) => ouvinte.texto(texto),
+                    mensagens, ferramentas: lista, publicar: (texto) => {
+                        textoSocialConfirmado = texto;
+                        ouvinte.confirmarTexto?.(texto);
+                        atualizarPreviaSocial(texto);
+                    },
                     executar: (chamada) => chamar(chamada, lista, ouvinte, combinado),
                     inferir: (somenteAcao) => motor.usar(configuracao.modelo, combinado, async (ativo) => {
                         combinado.throwIfAborted();
@@ -131,8 +143,17 @@ export function criarSessaoLocal(
                                 messages: mensagens, stream: true, cache_prompt: true, temperature: 0.3,
                                 max_tokens: Math.min(limite, disponivel),
                                 chat_template_kwargs: { enable_thinking: false },
-                                ...(lista.length ? { tools: lista, tool_choice: somenteAcao ? 'required' : 'auto' } : {}),
-                            }, combinado), combinado, () => {});
+                                ...(lista.length
+                                    ? { tools: lista, tool_choice: somenteAcao ? 'required' : 'auto' } : {}),
+                            }, combinado), combinado, (texto) => {
+                                if (!somenteAcao) atualizarPreviaSocial(
+                                    juntarTextos(textoSocialConfirmado, texto),
+                                );
+                            });
+                            if (resposta.motivo === 'length' || resposta.chamadas.length
+                                || anunciaAcao(resposta.texto) || simulaChamadaFerramenta(resposta.texto)) {
+                                atualizarPreviaSocial(textoSocialConfirmado);
+                            }
                             if (resposta.motivo !== 'length') return resposta;
                         }
                         throw new Error('A decisão social foi truncada após o limite de tentativas.');
@@ -211,6 +232,7 @@ export function criarSessaoLocal(
                             + 'A fala foi descartada para não registrar uma ação que não aconteceu.');
                     }
                     if (!conversa || reacao || agiu || !anunciaAcao(resposta.texto)) return;
+                    registrarPromessaRetida(configuracao.mcpUrl);
                     pausaPendente = anunciaPausa(resposta.texto);
                     if (pausaPendente && !lista.some((item) => item.function.name === 'fazer_pausa')) {
                         throw new Error('A pausa anunciada não está disponível neste turno. A fala foi descartada.');
@@ -219,7 +241,8 @@ export function criarSessaoLocal(
                     textoPublicado = textoAnterior;
                     ouvinte.texto(textoPublicado);
                     mensagens.push({ role: 'user', content: 'Você anunciou uma ação. Execute agora a ferramenta '
-                        + 'correspondente, sem repetir a fala. Se não houver ferramenta para isso, encerre sem texto.' });
+                        + 'correspondente, sem repetir a fala. Se não houver ferramenta para '
+                            + 'isso, encerre sem texto.' });
                     continue;
                 }
                 let publicouNoGeral = false;
@@ -228,18 +251,25 @@ export function criarSessaoLocal(
                 let agiuNaRodada = false;
                 for (const chamada of resposta.chamadas) {
                     if (encerrouParticipacao) {
+                        registrarChamadaDescartada(configuracao.mcpUrl, nomeCanonicoFerramenta(chamada.function.name));
                         mensagens.push({ role: 'tool', tool_call_id: chamada.id,
-                            content: 'Chamada não executada: a ação anterior já encerrou sua participação neste turno.' });
+                            content: 'Chamada não executada: a ação anterior já encerrou sua '
+                                + 'participação neste turno.' });
                         continue;
                     }
                     const { saida, erro, terminal, codigo } = await chamar(chamada, disponiveis, ouvinte, combinado);
                     mensagens.push({ role: 'tool', tool_call_id: chamada.id, content: saida });
-                    if (!erro && opcoes.encerrarFerramentasQuando?.(chamada.function.name, saida,
+                    if (opcoes.encerrarFerramentasQuando?.(chamada.function.name, saida,
                         { terminal, codigo })) resumindo = true;
                     if (!erro) acaoConcluida = true;
-                    if (!erro && !ferramentasDeConsulta.has(chamada.function.name)) agiuNaRodada = true;
-                    if (!erro && chamada.function.name === 'silencio') silenciou = true;
-                    if (!erro && terminal && codigo === 'interacao_aplicada') encerrouParticipacao = true;
+                    if (!erro && !ehConsultaFerramenta(chamada.function.name)) agiuNaRodada = true;
+                    if (!erro && ['silencio', 'nenhuma_acao'].includes(chamada.function.name)) {
+                        silenciou = true;
+                        encerrouParticipacao = true;
+                        textoPublicado = '';
+                        ouvinte.texto('');
+                    }
+                    if (!erro && terminal && conversa) encerrouParticipacao = true;
                     if (!erro && chamada.function.name === 'fazer_pausa' && conversa) {
                         encerrouParticipacao = true;
                         textoPublicado = '';
@@ -271,7 +301,7 @@ export function criarSessaoLocal(
                     continue;
                 }
                 const respondeuAntes = conversa && resposta.texto.trim()
-                    && resposta.chamadas.every((chamada) => !ferramentasDeConsulta.has(chamada.function.name)
+                    && resposta.chamadas.every((chamada) => !ehConsultaFerramenta(chamada.function.name)
                         && chamada.function.name !== 'fazer_pausa');
                 if (respondeuAntes) return;
             }

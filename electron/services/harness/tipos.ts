@@ -1,9 +1,14 @@
 import type { EtapaResposta } from '../../../shared/geral';
 
-/** Ganchos de um turno do harness. O expediente os usa para atualizar conversa, status e aprovações. */
+/**
+ * Ganchos para atualizar conversa, status e aprovações. Use `texto` para prévias e `confirmarTexto` quando o
+ * harness validar a fala com suas chamadas, inclusive se a ação encerrar a participação.
+ * Cada prévia contém o texto completo atual e pode substituir ou retirar trechos ainda provisórios.
+ */
 export type OuvinteTurno = {
     etapa?: (etapa: EtapaResposta) => void;
     texto: (completo: string) => void;
+    confirmarTexto?: (completo: string) => void;
     iniciarFerramenta: (id: string, resumo: string, entrada?: string) => void;
     concluirFerramenta: (id: string, erro: boolean, saida?: string) => void;
     aprovar: (id: string, resumo: string, sinal: AbortSignal) => Promise<boolean>;
@@ -13,7 +18,8 @@ export type OuvinteTurno = {
  * Restrições de um único turno. `ferramentas` limita os nomes oferecidos, na ordem de prioridade dada, e
  * `exigirFerramenta` exige uma ação real. Decisões sociais podem continuar após consultas, interpretações e pausas,
  * dentro do limite do turno. Use quando o comportamento social não pode depender da iniciativa do modelo.
- * Só o harness local aplica essas restrições; os CLIs oficiais seguem apenas as instruções do prompt.
+ * O MCP aplica as permissões do contexto a todos os provedores. O harness local também limita cada inferência
+ * por estas opções; os CLIs oficiais recebem o catálogo do servidor e revalidam as chamadas na execução.
  * `encerrarFerramentasQuando` retira as ferramentas após um retorno terminal e pede o resumo da etapa.
  * `exigirFerramentaAteConclusao` exige ações reais até esse retorno e publica texto somente no resumo.
  */

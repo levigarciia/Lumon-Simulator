@@ -1,3 +1,4 @@
+import { concluirAcao, recusarAcao, type ResultadoAcao } from './ferramentas/resultado';
 import { cargoAtual, type Funcionario, type StatusFuncionario } from '../../shared/funcionarios';
 import type { Resultado } from '../../shared/ponte';
 import { duracaoAusencia, type Ausencia, type MotivoAusencia } from '../../shared/ausencias';
@@ -26,7 +27,7 @@ export type RegistroPessoal = {
     registrar: (evento: NovoEvento, notificar?: boolean) => EventoSocial;
     ajustarRelacao: (autorId: string, colegaId: string, eventoId: string,
         delta: Partial<Record<'confianca' | 'afinidade' | 'respeito' | 'ressentimento', number>>) => void;
-    conversarReservado: (autorId: string, alvoId: string, texto: string) => Promise<string>;
+    conversarReservado: (autorId: string, alvoId: string, texto: string) => Promise<string | ResultadoAcao>;
     agora?: () => number;
 };
 
@@ -121,42 +122,50 @@ export class DepartamentoPessoal {
      * Sessão conduzida pelo conselheiro: os dois vão à Sala de Bem estar, conversam a sós e o atendido recupera estresse
      * e esgotamento conforme confia no conselheiro. Cada pessoa recebe no máximo uma sessão a cada três minutos.
      */
-    async sessaoBemEstar(conselheiroId: string, alvoId: string, mensagem: string): Promise<string> {
-        if (!mensagem.trim() || mensagem.length > 600) return 'Use uma mensagem entre 1 e 600 caracteres.';
+    async sessaoBemEstar(...argumentos: Parameters<DepartamentoPessoal['sessaoBemEstarResultado']>): Promise<string> {
+        return (await this.sessaoBemEstarResultado(...argumentos)).mensagem;
+    }
+
+    /** Conduz a sessão somente após a entrega privada confirmada pelo serviço social. */
+    async sessaoBemEstarResultado(conselheiroId: string, alvoId: string, mensagem: string): Promise<ResultadoAcao> {
+        if (!mensagem.trim() || mensagem.length > 600) return recusarAcao('Use uma mensagem entre 1 e 600 caracteres.');
         const conselheiro = this.buscar(conselheiroId);
         const alvo = this.buscar(alvoId);
         if (!conselheiro || cargoAtual(conselheiro.cargo) !== 'conselheiro') {
-            return 'Somente o conselheiro de bem estar conduz sessões.';
+            return recusarAcao('Somente o conselheiro de bem estar conduz sessões.');
         }
-        if (!alvo || alvo.id === conselheiroId) return 'Escolha um colega presente pelo ID de ver_escritorio.';
-        if (this.registro.ausencia(alvo.id)) return `${alvo.nome} está fora da sala.`;
+        if (!alvo || alvo.id === conselheiroId) {
+            return recusarAcao('Escolha um colega presente pelo ID de ver_escritorio.');
+        }
+        if (this.registro.ausencia(alvo.id)) return recusarAcao(`${alvo.nome} está fora da sala.`);
         if (['trabalhando', 'bloqueado'].includes(this.registro.status(alvo.id))) {
-            return `${alvo.nome} está trabalhando. Aguarde a tarefa terminar.`;
+            return recusarAcao(`${alvo.nome} está trabalhando. Aguarde a tarefa terminar.`);
         }
         const agora = this.registro.agora?.() ?? Date.now();
         if (agora - (this.ultimasSessoes.get(alvo.id) ?? -Infinity) < intervaloSessaoMs) {
-            return `${alvo.nome} acabou de ter uma sessão. Aguarde alguns minutos.`;
+            return recusarAcao(`${alvo.nome} acabou de ter uma sessão. Aguarde alguns minutos.`);
         }
-        if (this.registro.ausencia(conselheiroId)) return 'Você já está fora da sala principal.';
+        if (this.registro.ausencia(conselheiroId)) return recusarAcao('Você já está fora da sala principal.');
         if (['trabalhando', 'bloqueado'].includes(this.registro.status(conselheiroId))) {
-            return 'Termine sua tarefa antes de conduzir a sessão.';
+            return recusarAcao('Termine sua tarefa antes de conduzir a sessão.');
         }
         const impedimento = this.registro.validarAfastamento?.([alvo.id, conselheiroId], 'bem_estar');
-        if (impedimento) return impedimento;
+        if (impedimento) return recusarAcao(impedimento);
         const sessao = { motivo: 'bem_estar' as const, autorId: conselheiroId, justificativa: mensagem.trim() };
         const erro = this.registro.afastar(alvo.id, sessao, duracaoAusencia.bem_estar)
             ?? this.registro.afastar(conselheiroId, sessao, duracaoAusencia.bem_estar);
-        if (erro) return erro;
+        if (erro) return recusarAcao(erro);
         const chegaram = await this.registro.aguardarChegadaAnexos?.([alvo.id, conselheiroId]);
-        if (chegaram === false) return 'A sessão foi interrompida antes da chegada ao cômodo.';
+        if (chegaram === false) return recusarAcao('A sessão foi interrompida antes da chegada ao cômodo.');
         const resultado = await this.registro.conversarReservado(conselheiroId, alvo.id,
             `Sessão de bem estar: ${mensagem.trim()}`);
-        if (!resultado.startsWith('Ação registrada [')) return resultado;
+        const retorno = typeof resultado === 'string' ? concluirAcao(resultado) : resultado;
+        if (retorno.erro) return retorno;
         this.ultimasSessoes.set(alvo.id, agora);
         const fator = 0.5 + this.registro.confianca(alvo.id, conselheiroId) / 100;
         this.registro.estressar(alvo.id, Math.round(efeitosSessao.estresse * fator));
         this.registro.esgotar(alvo.id, Math.round(efeitosSessao.esgotamento * fator));
-        return `${resultado} A sessão aliviou ${alvo.nome} na medida da confiança que tem em você.`;
+        return concluirAcao(`${retorno.mensagem} A sessão aliviou ${alvo.nome} na medida da confiança que tem em você.`);
     }
 
     /** Anuncia a volta à sala depois de uma ausência. */

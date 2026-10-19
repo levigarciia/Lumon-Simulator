@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { aliasesFerramentas, politicasFerramentas } from './ferramentas';
 import { esquemaFerramenta, type Mensagem } from './funcionarios';
 import type { EventoSocial, ImpactoRelacao } from './social';
 
@@ -57,7 +58,7 @@ function rotularAcao(evento: EventoSocial): string | undefined {
     if (evento.tipo === 'pausa') return 'Pausa';
     if (evento.tipo === 'quebra') return 'Móvel quebrado';
     if (evento.tipo === 'conserto') return 'Conserto';
-    if (evento.tipo === 'comunicado') return 'Comunicado da Diretoria';
+    if (evento.tipo === 'comunicado') return evento.autorId === 'diretoria' ? 'Comunicado da Diretoria' : 'Comunicado';
     return rotulosAcao[evento.tipo] ? `${rotulosAcao[evento.tipo]} ${alvo}` : undefined;
 }
 
@@ -112,8 +113,9 @@ export function removerAutoVocativo(texto: string, nome: string): string {
 
 const verbosDeAcao = 'resolver|consertar|comprar|conversar|falar|verificar|revisar|checar|conferir|consultar|'
     + 'comer|descansar|cobrar|pausar|comecar|iniciar|acessar|assumir|abrir|buscar|perguntar|elogiar|propor|'
-    + 'chamar|tomar|ouvir|pegar|olhar|ver|procurar|analisar|pagar|reclamar|defender|contestar';
-const promessaDeAcao = new RegExp(`\\b(vou|irei|deixa que eu|deixe que eu|aproveito para|decidi|decido)\\s+`
+    + 'chamar|tomar|ouvir|pegar|olhar|ver|procurar|analisar|investigar|pagar|reclamar|defender|contestar|'
+    + 'entrar|sair|ir|voltar|retornar|refinar';
+const promessaDeAcao = new RegExp(`(?<!nao )\\b(vou|irei|deixa que eu|deixe que eu|aproveito para|decidi|decido)\\s+`
     + `(\\S+\\s+){0,2}?(${verbosDeAcao}|fazer\\s+(uma\\s+)?pausa)\\b`);
 
 /** Identifica uma decisão de pausa que precisa ser confirmada pela ferramenta correspondente. */
@@ -129,6 +131,12 @@ export function anunciaPausa(texto: string): boolean {
  */
 export function anunciaAcao(texto: string): boolean {
     return promessaDeAcao.test(texto.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase());
+}
+
+/** Identifica ferramentas escritas com argumentos no chat para exigir uma chamada real do protocolo. */
+export function simulaChamadaFerramenta(texto: string): boolean {
+    return [...Object.keys(politicasFerramentas), ...Object.keys(aliasesFerramentas)].some((nome) =>
+        new RegExp(`\\b${nome}\\b[\\s\x60]*(?:json\\s*)?\\{`).test(texto));
 }
 
 /** Falas seguidas entre agentes permitidas até uma nova mensagem da Diretoria ou da conversa livre ligada. */

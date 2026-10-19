@@ -1,3 +1,4 @@
+import { concluirAcao, recusarAcao, type ResultadoAcao } from './ferramentas/resultado';
 import { randomUUID } from 'node:crypto';
 import {
     avancarAgente,
@@ -10,7 +11,7 @@ import {
     type Ordem,
 } from '../../shared/agentes';
 import {
-    catalogo, capacidadeItem, celulaDeUso, celulaDoPonto, celulaEntrada, centroCelula, criarVerificadorLivre,
+    catalogo, capacidadeItem, celulaDeUso, celulaDoPonto, celulaEntrada, centroCelula,
     type Atividade, type Celula, type ItemPosicionado, type Sala,
 } from '../../shared/escritorio';
 import { escolherLugarEncontro } from '../../shared/encontros';
@@ -34,6 +35,7 @@ import { conversaDuranteAusencia, type Ausencia } from '../../shared/ausencias';
 import { anexoDaAusencia, capacidadeAnexo, lugarNoAnexo } from '../../shared/anexos';
 import { criarVerificadorCirculacao } from '../../shared/circulacao';
 import { protegerNecessidades, type NecessidadeLiberada } from '../../shared/acolhimento';
+import { cargoAtual } from '../../shared/cargos';
 
 const intervaloPassoMs = 100;
 const passosPorQuadro = 2;
@@ -85,10 +87,10 @@ type Pausa = {
     id: string; iniciadaEm: string;
     itemId: string; indiceUso: number; companhiaAvisada?: string;
     atividade: PausaSalva['atividade']; origem: RegistroPausa['origem']; segundos: number;
-    terminaEm: number | null; atualizadoEm: number | null; limite: number; concluir: (texto: string) => void;
+    terminaEm: number | null; atualizadoEm: number | null; limite: number; concluir: (resultado: ResultadoAcao) => void;
 };
 type Encontro = {
-    alvoId: string; celula: Celula; limite: number; chegou: boolean; concluir: (texto: string) => void;
+    alvoId: string; celula: Celula; limite: number; chegou: boolean; concluir: (resultado: ResultadoAcao) => void;
 };
 
 const atividadesDePausa = new Set<Atividade>(['cafe', 'comendo', 'descansando', 'ouvindo_musica']);
@@ -194,9 +196,9 @@ export class SimulacaoEscritorio {
             this.registrarPausa(id, 'interrupcao');
             this.pausas.delete(id);
             this.gravarPausas();
-            pausa.concluir('Sua pausa foi interrompida porque você saiu da sala.');
+            pausa.concluir(recusarAcao('Sua pausa foi interrompida porque você saiu da sala.'));
         }
-        this.ausencias.set(id, { ...ausencia, lugar: this.lugaresLivres(ausencia.motivo)[0],
+        this.ausencias.set(id, { ...ausencia, lugar: this.lugaresLivres(ausencia.motivo, [id])[0],
             duracao: segundos, terminaEm: this.segundos + segundos, retornando: false });
         this.registro.gravarAusencias?.(this.todasAusencias());
         this.registro.emitirEstado();
@@ -205,7 +207,7 @@ export class SimulacaoEscritorio {
     /** Verifica todas as vagas e rotas antes de iniciar um afastamento conjunto, como uma sessão. */
     validarAfastamento(ids: string[], motivo: Ausencia['motivo']): string | undefined {
         const tipo = anexoDaAusencia(motivo);
-        const livres = this.lugaresLivres(motivo);
+        const livres = this.lugaresLivres(motivo, ids);
         if (!ids.length) return 'Escolha ao menos um funcionário.';
         if (new Set(ids).size !== ids.length) return 'Escolha funcionários distintos.';
         if (tipo && livres.length < ids.length) return 'Não há lugares livres no anexo. Aguarde uma vaga.';
@@ -230,11 +232,17 @@ export class SimulacaoEscritorio {
         });
     }
 
-    private lugaresLivres(motivo: Ausencia['motivo']): number[] {
+    private lugaresLivres(motivo: Ausencia['motivo'], participantes: string[] = []): number[] {
         const tipo = anexoDaAusencia(motivo);
         if (!tipo) return [];
         const usados = new Set([...this.ausencias.values()].filter((ausencia) => ausencia.motivo === motivo)
             .map((ausencia) => ausencia.lugar));
+        if (tipo === 'bem_estar') {
+            for (const pessoa of this.registro.funcionarios()) {
+                if (cargoAtual(pessoa.cargo) !== 'conselheiro' || participantes.includes(pessoa.id)) continue;
+                if (!this.ausencias.has(pessoa.id)) usados.add(0);
+            }
+        }
         return Array.from({ length: capacidadeAnexo[tipo] }, (_, indice) => indice)
             .filter((indice) => !usados.has(indice));
     }
@@ -246,7 +254,7 @@ export class SimulacaoEscritorio {
             const agente = this.agentesPorId.get(id);
             if (!agente) continue;
             const tipo = anexoDaAusencia(salva.motivo);
-            const livre = this.lugaresLivres(salva.motivo)[0];
+            const livre = this.lugaresLivres(salva.motivo, [id])[0];
             const ocupado = [...this.ausencias.values()].some((outra) =>
                 outra.motivo === salva.motivo && outra.lugar === salva.lugar);
             const lugar = tipo && salva.lugar !== undefined && salva.lugar < capacidadeAnexo[tipo] && !ocupado
@@ -380,8 +388,8 @@ export class SimulacaoEscritorio {
             this.proximoAviso.set(id, this.segundos + 120);
             const agente = this.agentesPorId.get(id);
             if (agente) this.agentesPorId.set(id, avancarAgente(agente, this.contexto(), 0, this.ordemDe(id)));
-            pausa.concluir(`Pausa interrompida: ${motivo} Você deixou de usar o item. `
-                + 'A recuperação foi encerrada. Não anuncie sua volta automaticamente no Geral.');
+            pausa.concluir(recusarAcao(`Pausa interrompida: ${motivo} Você deixou de usar o item. `
+                + 'A recuperação foi encerrada. Não anuncie sua volta automaticamente no Geral.'));
         }
         if (alteradas) this.gravarPausas();
         this.registro.emitirQuadro({ segundos: this.segundos, agentes: this.agentes() });
@@ -409,34 +417,40 @@ export class SimulacaoEscritorio {
     }
 
     /** Reserva um canto para os dois participantes e responde somente quando ambos chegarem. */
-    encontrarColega(id: string, alvoId: string): Promise<string> {
+    async encontrarColega(...argumentos: Parameters<SimulacaoEscritorio['encontrarColegaResultado']>): Promise<string> {
+        return (await this.encontrarColegaResultado(...argumentos)).mensagem;
+    }
+
+    /** Confirma chegada ou interrupção sem inferir estado pela mensagem do encontro. */
+    async encontrarColegaResultado(id: string, alvoId: string): Promise<ResultadoAcao> {
         this.sincronizar();
         const autor = this.agentesPorId.get(id);
         const alvo = this.agentesPorId.get(alvoId);
-        if (!autor || !alvo || id === alvoId) return Promise.resolve('Escolha um colega presente na sala.');
+        if (!autor || !alvo || id === alvoId) return recusarAcao('Escolha um colega presente na sala.');
         if (this.parceiroDePausa(id) === alvoId) {
-            return Promise.resolve('Vocês já dividem o item de pausa. Conversem aqui, sem sair ou interromper o descanso.');
+            return concluirAcao('Vocês já dividem o item de pausa. Conversem aqui, sem sair ou '
+                + 'interromper o descanso.');
         }
         const atual = this.encontros.get(id);
         if (atual?.alvoId === alvoId && atual.chegou) {
             this.manterEncontro(id, alvoId);
-            return Promise.resolve('Você chegou perto do colega. Continuem a conversa aqui.');
+            return concluirAcao('Você chegou perto do colega. Continuem a conversa aqui.');
         }
-        if (this.emPausa(id)) return Promise.resolve('Termine seu encontro ou pausa atual antes de sair de novo.');
-        if (this.emPausa(alvoId)) return Promise.resolve('O colega está em outra pausa ou encontro. Aguarde terminar.');
+        if (this.emPausa(id)) return recusarAcao('Termine seu encontro ou pausa atual antes de sair de novo.');
+        if (this.emPausa(alvoId)) return recusarAcao('O colega está em outra pausa ou encontro. Aguarde terminar.');
         const status = this.registro.statusTrabalho(id);
         if (status === 'bloqueado' || (status === 'trabalhando' && !this.registro.emConversa?.(id))) {
-            return Promise.resolve('Termine sua tarefa primeiro.');
+            return recusarAcao('Termine sua tarefa primeiro.');
         }
         const statusAlvo = this.registro.statusTrabalho(alvoId);
         if (statusAlvo === 'bloqueado' || (statusAlvo === 'trabalhando' && !this.registro.emConversa?.(alvoId))) {
-            return Promise.resolve('O colega está trabalhando. Aguarde a tarefa terminar para conversar.');
+            return recusarAcao('O colega está trabalhando. Aguarde a tarefa terminar para conversar.');
         }
         const ocupadas = this.agentes().filter((item) => item.id !== id && item.id !== alvoId)
             .map((item) => celulaDoPonto(item.posicao));
         const destino = escolherLugarEncontro(this.salaConhecida, autor.posicao, alvo.posicao,
             [...ocupadas, ...[...this.encontros.values()].map((encontro) => encontro.celula)]);
-        if (!destino) return Promise.resolve('Não há caminho livre até o colega.');
+        if (!destino) return recusarAcao('Não há caminho livre até o colega.');
         return new Promise((concluir) => {
             this.encontros.set(id, { alvoId, celula: destino.autor, limite: this.segundos + 40,
                 chegou: false, concluir });
@@ -460,11 +474,11 @@ export class SimulacaoEscritorio {
         }
         const encontro = this.encontros.get(id);
         if (!encontro) return;
-        encontro.concluir('O encontro foi encerrado.');
+        encontro.concluir(recusarAcao('O encontro foi encerrado.', 'encontro_interrompido'));
         this.encontros.delete(id);
         const parceiro = this.encontros.get(encontro.alvoId);
         if (parceiro?.alvoId === id) {
-            parceiro.concluir('O encontro foi encerrado.');
+            parceiro.concluir(recusarAcao('O encontro foi encerrado.', 'encontro_interrompido'));
             this.encontros.delete(encontro.alvoId);
         }
         this.registro.emitirEstado();
@@ -474,15 +488,22 @@ export class SimulacaoEscritorio {
      * Leva o funcionário ao item mais próximo do tipo pedido e só responde quando ele volta, para que o turno do
      * harness fique parado durante a pausa. Devolve um texto para o agente ler.
      */
-    pedirPausa(
+    async pedirPausa(...argumentos: Parameters<SimulacaoEscritorio['pedirPausaResultado']>): Promise<string> {
+        return (await this.pedirPausaResultado(...argumentos)).mensagem;
+    }
+
+    /** Inicia a pausa com resultado estruturado, concluído pelo relógio civil. */
+    async pedirPausaResultado(
         funcionarioId: string, atividade: Atividade, minutos: number, preservarTurnoReservado = false,
-    ): Promise<string> {
-        if (!ehAtividadeDePausa(atividade)) return Promise.resolve('Escolha uma atividade de pausa válida.');
+    ): Promise<ResultadoAcao> {
+        if (!ehAtividadeDePausa(atividade)) {
+            return recusarAcao('Escolha uma atividade de pausa válida.', 'pausa_recusada');
+        }
         this.sincronizar();
         const agente = this.agentesPorId.get(funcionarioId);
-        if (!agente) return Promise.resolve('Você não está na sala.');
+        if (!agente) return recusarAcao('Você não está na sala.', 'pausa_recusada');
         if (this.pausas.has(funcionarioId) || this.ausencias.has(funcionarioId)) {
-            return Promise.resolve('Você já está em pausa ou em um encontro.');
+            return recusarAcao('Você já está em pausa ou em um encontro.', 'pausa_recusada');
         }
         const item = this.itemMaisProximo(agente, atividade);
         if (!item) {
@@ -490,17 +511,20 @@ export class SimulacaoEscritorio {
                 existente.quebrado && catalogo[existente.tipo].uso?.atividade === atividade);
             if (quebrados.length) {
                 const itens = quebrados.map((quebrado) => `${catalogo[quebrado.tipo].nome} [ID ${quebrado.id}]`);
-                return Promise.resolve('A pausa não pode começar: os itens para essa atividade estão quebrados. '
-                    + `${itens.join(', ')}. Use consertar_item com o ID do móvel para consertar antes de tentar novamente.`);
+                return recusarAcao('A pausa não pode começar: os itens para essa atividade estão quebrados. '
+                    + `${itens.join(', ')}. Use consertar_item com o ID do móvel para consertar antes de '
+                        + 'tentar novamente.`, 'pausa_recusada');
             }
-            return Promise.resolve('Não há nenhum item para isso no escritório. Peça à Diretoria que compre um.');
+            return recusarAcao('Não há nenhum item para isso no escritório. Peça à Diretoria que '
+                + 'compre um.', 'pausa_recusada');
         }
         if (!Number.isInteger(minutos) || minutos < 1 || minutos > minutosMaximosPausa) {
-            return Promise.resolve('Escolha uma pausa entre 1 e 15 minutos reais.');
+            return recusarAcao('Escolha uma pausa entre 1 e 15 minutos reais.', 'pausa_recusada');
         }
         const indiceUso = this.vagasLivres(item, funcionarioId)[0];
         if (indiceUso === undefined) {
-            return Promise.resolve('Os itens dessa atividade estão ocupados. Aguarde um ficar livre para acompanhar.');
+            return recusarAcao('Os itens dessa atividade estão ocupados. Aguarde um ficar livre '
+                + 'para acompanhar.', 'pausa_recusada');
         }
         const parceiroEncontro = this.parceiroEncontro(funcionarioId);
         if (parceiroEncontro) {
@@ -581,7 +605,7 @@ export class SimulacaoEscritorio {
             this.proximoAviso.delete(id);
             if (this.ausencias.delete(id)) this.registro.gravarAusencias?.(this.todasAusencias());
             this.registrarPausa(id, 'interrupcao');
-            this.pausas.get(id)?.concluir('Você foi demitido.');
+            this.pausas.get(id)?.concluir(recusarAcao('Você foi demitido.'));
             pausasAlteradas ||= this.pausas.delete(id);
             this.cancelarEncontro(id);
         }
@@ -591,7 +615,7 @@ export class SimulacaoEscritorio {
     private ordemDe(funcionarioId: string): Ordem {
         const ausencia = this.ausencias.get(funcionarioId);
         if (ausencia) {
-            if (ausencia.retornando) return { tipo: 'mesa' };
+            if (ausencia.retornando) return this.ordemDoCargo(funcionarioId);
             const anexo = anexoDaAusencia(ausencia.motivo);
             return anexo && ausencia.lugar !== undefined
                 ? { tipo: 'anexo', anexo, lugar: ausencia.lugar } : { tipo: 'saida' };
@@ -599,7 +623,16 @@ export class SimulacaoEscritorio {
         const encontro = this.encontros.get(funcionarioId);
         if (encontro) return { tipo: 'encontro', celula: encontro.celula, encontroId: `encontro:${encontro.alvoId}` };
         const pausa = this.pausas.get(funcionarioId);
-        return pausa ? { tipo: 'item', itemId: pausa.itemId, indiceUso: pausa.indiceUso } : { tipo: 'mesa' };
+        return pausa ? { tipo: 'item', itemId: pausa.itemId, indiceUso: pausa.indiceUso }
+            : this.ordemDoCargo(funcionarioId);
+    }
+
+    private ordemDoCargo(id: string): Ordem {
+        const pessoa = this.registro.funcionarios().find((funcionario) => funcionario.id === id);
+        const cargo = cargoAtual(pessoa?.cargo ?? 'refinador');
+        if (cargo === 'supervisor') return { tipo: 'ronda' };
+        if (cargo === 'conselheiro') return { tipo: 'anexo', anexo: 'bem_estar', lugar: 0 };
+        return { tipo: 'mesa' };
     }
 
     private vagasLivres(item: ItemPosicionado, id: string): number[] {
@@ -613,7 +646,7 @@ export class SimulacaoEscritorio {
             const celula = celulaDeUso(item, indice)!;
             if (usadas.some((usada) => usada?.x === celula.x && usada.z === celula.z)) return false;
             return encontrarRota(celulaDoPonto(origem.posicao), celula,
-                criarVerificadorLivre(this.salaConhecida)) !== null;
+                criarVerificadorCirculacao(this.salaConhecida)) !== null;
         });
     }
 
@@ -641,7 +674,7 @@ export class SimulacaoEscritorio {
                 + 'Sua vez terminou. '
                 + `Estado privado: ${resumirNecessidades(necessidades)}. Não anuncie a volta no Geral.`
             : 'Você não conseguiu chegar ao item a tempo e voltou ao trabalho.';
-        pausa.concluir(texto);
+        pausa.concluir(terminou ? concluirAcao(texto, 'pausa_concluida', { terminal: true }) : recusarAcao(texto));
         this.registro.emitirEstado();
     }
 
@@ -733,7 +766,11 @@ export class SimulacaoEscritorio {
         const agente = this.agentesPorId.get(id);
         if (!ausencia || !agente) return;
         if (ausencia.retornando) {
-            if (agente.atividade !== 'trabalhando' || agente.destinoId !== agente.mesaId) return;
+            const ordem = this.ordemDoCargo(id);
+            if (ordem.tipo === 'mesa' && (agente.atividade !== 'trabalhando'
+                || agente.destinoId !== agente.mesaId)) return;
+            if (ordem.tipo === 'anexo' && (agente.anexo !== ordem.anexo || agente.rota.length)) return;
+            if (ordem.tipo === 'ronda' && agente.destinoId !== 'ronda') return;
         } else {
             if (agente.atividade !== 'ausente') return;
             if (ausencia.duracao !== undefined) {
@@ -807,8 +844,9 @@ export class SimulacaoEscritorio {
         if (Math.hypot(agente.posicao.x - alvo.posicao.x, agente.posicao.z - alvo.posicao.z) > 3) return;
         encontro.chegou = true;
         this.manterEncontro(id, encontro.alvoId);
-        encontro.concluir('Você chegou perto do colega. Fale com ele agora usando conversar_reservado: texto normal '
-            + 'vai para quem conversa com você, não para o colega. Sem conversa, vocês voltam às mesas.');
+        encontro.concluir(concluirAcao('Você chegou perto do colega. Fale com ele agora usando '
+            + 'conversar_reservado: texto normal '
+            + 'vai para quem conversa com você, não para o colega. Sem conversa, vocês voltam às mesas.'));
     }
 
     private virarDia(): void {

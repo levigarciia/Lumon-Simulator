@@ -21,7 +21,7 @@ const distanciaCamera = 20;
 
 function rotuloNaSala(id: string, estado: EstadoPublico): string | undefined {
     const ausencia = estado.ausencias?.[id];
-    if (ausencia?.retornando) return 'Voltando à mesa';
+    if (ausencia?.retornando) return 'Retornando às atividades';
     if (ausencia?.duracao !== undefined) return ausencia.motivo === 'folga' ? 'Saindo de folga' : 'Indo ao anexo';
     if (ausencia) return nomesAusencia[ausencia.motivo];
     if (estado.status[id] === 'conversando') return 'Conversando';

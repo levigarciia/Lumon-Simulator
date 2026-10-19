@@ -1,3 +1,5 @@
+import { concluirAcao, recusarAcao, type ResultadoAcao } from './ferramentas/resultado';
+import { ferramentasDisponiveis, nomeCanonicoFerramenta } from '../../shared/ferramentas';
 import { randomUUID } from 'node:crypto';
 import { instrucaoAgirNoTurno, instrucaoDepartamento } from '../../shared/departamento';
 import { instrucaoHierarquia } from '../../shared/diretoria';
@@ -10,6 +12,8 @@ import {
     encontrarInterpelados,
     encontrarMencoes,
     ehSilencio,
+    anunciaAcao,
+    simulaChamadaFerramenta,
     removerFrasesRepetidas,
     ehCumprimento,
     removerAutoVocativo,
@@ -30,6 +34,7 @@ const mensagensGeralNoReservado = 12;
 
 /** Acesso do canal ao restante do escritório. */
 export type RegistroGeral = {
+    promessaRetida?: (origem: 'geral' | 'reservado') => void;
     funcionarios: () => Funcionario[];
     mensagens: () => MensagemGeral[];
     gravar: (mensagens: MensagemGeral[]) => void;
@@ -57,6 +62,7 @@ export type RegistroGeral = {
     reservadoSemResposta?: (id: string, colegaId: string) => void;
     conversaReservadaEncerrada?: (id: string, colegaId: string) => void;
     confirmarPercepcao?: (id: string) => void;
+    aoEncerrarTurno?: (id: string, interrompido: boolean) => void;
 };
 
 type Vez = {
@@ -76,26 +82,12 @@ const falasParaAgirNoEmbate = 6;
 function motivoDoEmbate(colega: string, falas: number): string {
     return `Você e ${colega} já trocaram ${falas} falas seguidas na mesma discussão, que está em ciclo. `
         + 'Não rebata nem conteste de novo o mesmo ponto, nem com outras palavras. Encerre o embate: ceda, peça '
-        + 'desculpas, registre o que sente com reagir_ao_acontecimento, faça uma pausa ou leve a briga para '
+        + 'desculpas, registre o que sente com atualizar_pensamento, faça uma pausa ou leve a briga para '
         + 'conversar_reservado.';
 }
 
-const ferramentasReflexao = ['interagir_socialmente', 'reagir_ao_acontecimento', 'atualizar_pensamento',
-    'conversar_reservado', 'nenhuma_acao'];
-
-/**
- * Ferramentas do turno de reação. Citado pela Diretoria, o agente precisa agir sobre o pedido, então ganha pausa,
- * conserto e ações sociais. Reações entre colegas permitem ações públicas e propostas à Diretoria.
- */
 function ferramentasDaReacao(pedidoDaDiretoria: boolean, embate: boolean): string[] {
-    const base = pedidoDaDiretoria
-        ? ['ver_escritorio', 'consertar_item', 'fazer_pausa', 'atualizar_pensamento', 'conversar_reservado',
-            'reagir_ao_acontecimento',
-            'interagir_socialmente', 'nenhuma_acao']
-        : ferramentasReflexao;
-    const ferramentas = [...new Set([...base, 'consultar', 'propor_mudanca', 'escolher_carreira'])];
-    return embate ? [...new Set([...ferramentas.filter((nome) => nome !== 'nenhuma_acao'), 'fazer_pausa'])]
-        : ferramentas;
+    return ferramentasDisponiveis('geral', { reacao: { diretoria: pedidoDaDiretoria, embate } });
 }
 
 const aberturaPedidoDaDiretoria = 'Turno de ação: a Diretoria citou você. Execute agora pela ferramenta o '
@@ -104,17 +96,18 @@ const aberturaPedidoDaDiretoria = 'Turno de ação: a Diretoria citou você. Exe
 const aberturaReflexao = 'Turno de reação.';
 
 const instrucoesReacao = `Num "${aberturaReflexao}" texto livre não sai. Se há algo a tratar com um colega, `
-    + 'use interagir_socialmente apenas se houver motivo novo e concreto: conteste, defenda ou repare. '
+    + 'use contestar, defender ou desculpar apenas se houver motivo novo e concreto. '
     + 'Ataque público é motivo concreto. '
     + 'Reagir é privado. Reserve intimidades; sem novidade, nenhuma_acao.';
 
 const instrucoesLideranca = 'Na liderança, reveja cobranças indevidas. Cobre falhas ou suspeitas de quebra via '
-    + 'interagir_socialmente (acao cobrar, alcance publico, fontes). Discordância não justifica punição. '
+    + 'cobrar (alcance publico, fontes). Discordância não justifica punição. '
     + 'Em inimizade, propor_mudanca (tipo demissao) pode declarar conflito pessoal, sem inventar falhas.';
 
 type FalaAtiva = {
     etapa?: EtapaResposta;
     falou: boolean; publicou: boolean; liberar: () => void; pausada: boolean; reflexao: boolean; pedidoDaDiretoria: boolean;
+    embate?: boolean;
     silenciou?: boolean;
     encerrouParticipacao?: boolean;
 };
@@ -131,15 +124,17 @@ function instrucoesGeral(funcionario: Funcionario, equipe: Funcionario[]): strin
         instrucaoHierarquia(funcionario.cargo),
         `Seu ID é ${funcionario.id}. Seus colegas: ${colegas || 'ninguém ainda'}. Use IDs nas ferramentas.`,
         'Geral: conversa pública e consulta do Work. Texto normal nunca é privado.',
+        'Escreva falas em texto livre, sem formato JSON. Use argumentos estruturados apenas nas chamadas de ferramenta.',
         'Fale em português brasileiro, em primeira pessoa e com naturalidade. Complete explicações.',
         `Pausas exigem fazer_pausa. ${instrucaoAgirNoTurno}`,
         'Impressões privadas usam atualizar_pensamento, nunca o Geral.',
-        'Responda ao motivo atual; histórico é contexto, sem retomar o Work.',
+        'Responda ao motivo atual. Você decide se entra ou volta ao Work usando ir_para_work quando há arquivo '
+            + 'disponível. Pode conversar, descansar ou ficar livre. Histórico não é ordem pendente.',
         'Confira acusações. Cota só do contexto atual.',
         instrucoesReacao,
         ...(funcionario.cargo === 'lider' || funcionario.cargo === 'supervisor' ? [instrucoesLideranca] : []),
         instrucoesSociais,
-        'Para silenciar, use silencio, sem publicar o marcador.',
+        'Para silenciar, use nenhuma_acao, sem publicar o marcador.',
     ].join('\n');
 }
 
@@ -180,8 +175,9 @@ export class CanalGeral {
         if (this.falandoId === id) return;
         if (this.fila.some((vez) => vez.funcionarioId === id)) return;
         this.enfileirar([{ funcionarioId: id, contada: false, livre: true, motivos: [
-            'Aviso periódico: momento livre. Não é uma ordem da Diretoria. Se o corpo pedir de verdade, '
-                + 'faça uma pausa; se tiver um compromisso pendente, retome. Caso contrário, fique em silêncio. '
+            'Aviso periódico: momento livre. Não é uma ordem da Diretoria. Converse sobre o que quiser, '
+                + 'faça uma pausa por vontade própria ou avalie um compromisso pendente. Se houver arquivo disponível, '
+                + 'decida se quer ir_para_work, conversar ou continuar livre. Pode ficar em silêncio. '
                 + 'Não relate necessidades no Geral.',
         ] }]);
     }
@@ -279,6 +275,12 @@ export class CanalGeral {
         if (resposta?.contada && this.conversaLivre) this.restantesNaRodada--;
     }
 
+    /** Expõe as restrições da reação atual ao catálogo de capacidades. */
+    contextoReacao(id: string): { diretoria: boolean; embate: boolean } | undefined {
+        const fala = this.ativas.get(id);
+        return fala?.reflexao ? { diretoria: fala.pedidoDaDiretoria, embate: !!fala.embate } : undefined;
+    }
+
     /** Impede novas publicações após uma ação que já concluiu a participação atual. */
     participacaoEncerrada(id: string): boolean {
         return this.ativas.get(id)?.encerrouParticipacao ?? false;
@@ -336,7 +338,20 @@ export class CanalGeral {
     }
 
     /** Publica a mensagem explícita de `falar_no_geral` e coloca os colegas citados na fila. */
-    falarDoAgente(funcionarioId: string, textoOriginal: string, ferramentas: Ferramenta[] = []): string {
+    falarDoAgente(...argumentos: Parameters<CanalGeral['falarDoAgenteResultado']>): string {
+        return this.falarDoAgenteResultado(...argumentos).mensagem;
+    }
+
+    /** Publica no Geral com confirmação explícita da entrega. */
+    falarDoAgenteResultado(
+        funcionarioId: string, textoOriginal: string, ferramentas: Ferramenta[] = [],
+    ): ResultadoAcao {
+        return this.publicarFalaDoAgente(funcionarioId, textoOriginal, ferramentas);
+    }
+
+    private publicarFalaDoAgente(
+        funcionarioId: string, textoOriginal: string, ferramentas: Ferramenta[] = [], acaoConfirmada = false,
+    ): ResultadoAcao {
         const autor = this.registro.funcionarios().find((funcionario) => funcionario.id === funcionarioId);
         const mensagens = this.registro.mensagens();
         const ultimaDiretoria = mensagens.findLastIndex((mensagem) => mensagem.autorId === autorUsuario);
@@ -346,22 +361,30 @@ export class CanalGeral {
             .filter((mensagem) => (mensagem.autorId === funcionarioId) === proprias).map((mensagem) => mensagem.texto);
         const semVocativo = autor ? removerAutoVocativo(textoOriginal, autor.nome) : textoOriginal;
         const texto = removerFrasesRepetidas(semVocativo, textosDe(true), textosDe(false));
-        if (!texto) return this.guardarSilencio(funcionarioId);
+        if (!texto) return concluirAcao(this.guardarSilencio(funcionarioId), 'vez_encerrada', { terminal: true });
         const fala = this.destinosReservados.has(funcionarioId) ? undefined : this.ativas.get(funcionarioId);
-        if (fala?.encerrouParticipacao) throw new Error('Sua ação já encerrou a participação neste turno.');
+        if (fala?.encerrouParticipacao && !acaoConfirmada) {
+            throw new Error('Sua ação já encerrou a participação neste turno.');
+        }
         if (fala?.silenciou) throw new Error('Você encerrou sua vez em silêncio. Aguarde outro turno.');
-        if (ehSilencio(texto)) return this.guardarSilencio(funcionarioId);
+        if (ehSilencio(texto)) return concluirAcao(this.guardarSilencio(funcionarioId), 'vez_encerrada', { terminal: true });
         const emPausa = encontrarMencoes(texto, this.registro.funcionarios())
             .find((colega) => this.registro.emPausa?.(colega.id));
         if (emPausa) {
-            return `${emPausa.nome} está em pausa e indisponível no Geral. Converse somente em particular.`;
+            return recusarAcao(`${emPausa.nome} está em pausa e indisponível no Geral. Converse somente em particular.`);
         }
         if (fala?.reflexao) throw new Error('Este é o turno de reação. Sua resposta pública vem no próximo turno.');
         if (fala?.publicou) {
-            throw new Error('Você já publicou sua fala neste turno. Aguarde uma nova mensagem antes de falar novamente.');
+            throw new Error('Você já publicou sua fala neste turno. Aguarde uma nova mensagem '
+                + 'antes de falar novamente.');
+        }
+        if (simulaChamadaFerramenta(texto) || anunciaAcao(texto) && !acaoConfirmada) {
+            this.registro.promessaRetida?.('geral');
+            return recusarAcao('A fala anunciou uma ação e não foi publicada. Execute a ferramenta '
+                + 'correspondente neste turno ou responda sem prometer uma ação.');
         }
         if (mensagens.slice(ultimaDiretoria + 1).some((mensagem) => repeteFala(texto, mensagem.texto))) {
-            return this.guardarSilencio(funcionarioId);
+            return concluirAcao(this.guardarSilencio(funcionarioId), 'vez_encerrada', { terminal: true });
         }
         if (fala) { fala.falou = true; fala.publicou = true; }
         this.removerPrevia(funcionarioId);
@@ -370,7 +393,8 @@ export class CanalGeral {
         const mencionados = encontrarInterpelados(texto, this.registro.funcionarios())
             .filter((colega) => colega.id !== funcionarioId);
         this.enfileirar(mencionados.flatMap((colega) => this.vezesDoCitado(funcionarioId, colega.id, texto)), true);
-        return mencionados.length > 0 ? 'Mensagem enviada. Os colegas citados vão responder no Geral.' : 'Mensagem enviada.';
+        return concluirAcao(mencionados.length > 0
+            ? 'Mensagem enviada. Os colegas citados vão responder no Geral.' : 'Mensagem enviada.', 'fala_publicada');
     }
 
     /** Numa discussão em ciclo, o citado é orientado a agir e, se ela persistir, só tem a vez de agir. */
@@ -671,6 +695,7 @@ export class CanalGeral {
             if (vez.reservadoCom && !this.emExecucao(funcionario.id) && !this.emExecucao(vez.reservadoCom)) {
                 this.registro.conversaReservadaEncerrada?.(funcionario.id, vez.reservadoCom);
             }
+            this.registro.aoEncerrarTurno?.(funcionario.id, controle.signal.aborted);
         };
         if (primeiro === 'liberada') {
             void andamento.then((fala) => {
@@ -749,7 +774,7 @@ export class CanalGeral {
                     'Explique na própria resposta, sem prometer explicar depois.',
                     instrucaoAgirNoTurno,
                     'Não repita despedidas, concordâncias ou ofertas de ajuda já ditas no diálogo.',
-                    'Se a conversa terminou ou não tiver nada útil a acrescentar, use silencio.',
+                    'Se a conversa terminou ou não tiver nada útil a acrescentar, use nenhuma_acao.',
                 ].join('\n') : instrucoesGeral(funcionario, equipe)), personalidade].filter(Boolean).join('\n\n'),
                 modo: 'personagem',
                 atividade: 'social',
@@ -801,11 +826,13 @@ export class CanalGeral {
             ] : []),
         ].join('\n\n');
         const fala: FalaAtiva = { falou: false, publicou: false, liberar, pausada: false,
-            reflexao: !!vez.reflexao, pedidoDaDiretoria: !!vez.pedidoDaDiretoria };
+            embate: vez.embate, reflexao: !!vez.reflexao, pedidoDaDiretoria: !!vez.pedidoDaDiretoria };
         this.ativas.set(funcionario.id, fala);
         if (vez.reservadoCom) this.destinosReservados.set(funcionario.id, vez.reservadoCom);
         let respostaPublica = '';
         const mensagensFerramentas = new Map<string, string>();
+        const nomesFerramentas = new Map<string, string>();
+        let acaoConfirmada = false;
         const atualizarEtapa = (etapa: EtapaResposta) => {
             if (sinal.aborted || fala.etapa === etapa) return;
             fala.etapa = etapa;
@@ -816,17 +843,21 @@ export class CanalGeral {
             criadaEm: new Date().toISOString(), ferramentas: [],
         };
         const ouvinte = {
+            confirmarTexto: (texto: string) => {
+                if (!sinal.aborted) respostaPublica = texto;
+            },
             etapa: (etapa: EtapaResposta) => atualizarEtapa(
                 vez.reflexao && etapa === 'processando' ? 'reagindo' : etapa,
             ),
             texto: (texto: string) => {
-                if (sinal.aborted) return;
+                if (sinal.aborted || fala.pausada) return;
                 respostaPublica = texto;
                 if (texto.trim()) atualizarEtapa(vez.reflexao ? 'reagindo' : 'escrevendo');
                 if (vez.reflexao || vez.reservadoCom || fala.falou || fala.silenciou) return;
                 const conteudo = texto.trim();
                 const marcador = conteudo.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-                if (!conteudo || ehSilencio(conteudo) || '(silencio)'.startsWith(marcador)
+                if (!conteudo || ehSilencio(conteudo) || anunciaAcao(conteudo) || simulaChamadaFerramenta(conteudo)
+                    || '(silencio)'.startsWith(marcador)
                     || 'silencio'.startsWith(marcador)) {
                     this.removerPrevia(funcionario.id);
                     return;
@@ -845,6 +876,7 @@ export class CanalGeral {
                 const mensagemId = randomUUID();
                 mensagensFerramentas.set(id, mensagemId);
                 const acao = resumo.replace(/^Escritório: /, '');
+                nomesFerramentas.set(id, nomeCanonicoFerramenta(acao));
                 const iniciadaEm = new Date().toISOString();
                 this.registrarMensagem({
                     id: mensagemId, autorId: funcionario.id, tipo: 'acao', texto: '', criadaEm: iniciadaEm,
@@ -857,6 +889,9 @@ export class CanalGeral {
             },
             concluirFerramenta: (id: string, erro: boolean, saida?: string) => {
                 const mensagemId = mensagensFerramentas.get(id);
+                const nome = nomesFerramentas.get(id);
+                if (!sinal.aborted && mensagemId && !erro && nome
+                    && !['nenhuma_acao', 'falar_no_geral'].includes(nome)) acaoConfirmada = true;
                 if (!sinal.aborted && mensagemId) this.atualizarFerramenta(mensagemId, {
                     estado: erro ? 'falhou' : 'concluida', saida, concluidaEm: new Date().toISOString(),
                 });
@@ -864,10 +899,29 @@ export class CanalGeral {
             aprovar: async () => false,
         };
         try {
-            await entrada.sessao.enviar(prompt, ouvinte, sinal, vez.reflexao ? {
-                ferramentas: ferramentasDaReacao(!!vez.pedidoDaDiretoria, !!vez.embate),
-                exigirFerramenta: true,
-            } : vez.reservadoCom ? { ferramentas: this.registro.ferramentasReservadas?.(funcionario.id) } : undefined);
+            let pedido = prompt;
+            for (let tentativa = 0; tentativa < 3; tentativa++) {
+                respostaPublica = '';
+                await entrada.sessao.enviar(pedido, ouvinte, sinal, vez.reflexao ? {
+                    ferramentas: ferramentasDaReacao(!!vez.pedidoDaDiretoria, !!vez.embate),
+                    exigirFerramenta: true,
+                } : vez.reservadoCom ? {
+                    ferramentas: this.registro.ferramentasReservadas?.(funcionario.id),
+                } : undefined);
+                sinal.throwIfAborted();
+                if (vez.reflexao || fala.falou || fala.silenciou || fala.encerrouParticipacao
+                    || acaoConfirmada || !anunciaAcao(respostaPublica)
+                        && !simulaChamadaFerramenta(respostaPublica)) break;
+                this.removerPrevia(funcionario.id);
+                this.registro.promessaRetida?.(vez.reservadoCom ? 'reservado' : 'geral');
+                if (tentativa === 2) {
+                    throw new Error('O agente anunciou uma ação sem executar a ferramenta após três tentativas.');
+                }
+                pedido = 'Sua fala anunciou uma ação e não foi publicada. Você continua no mesmo turno. '
+                    + 'Execute a ferramenta correspondente pelo protocolo, sem escrever seu nome e JSON no texto, '
+                    + 'ou responda sem prometer uma ação. '
+                    + 'Use nenhuma_acao se preferir encerrar sua participação.';
+            }
         } finally {
             for (const mensagemId of mensagensFerramentas.values()) this.atualizarFerramenta(mensagemId, {
                 estado: sinal.aborted ? 'recusada' : 'falhou', concluidaEm: new Date().toISOString(),
@@ -884,11 +938,15 @@ export class CanalGeral {
             this.registro.gravarLeitura?.(funcionario.id, lida);
         }
         const texto = respostaPublica.trim();
-        if (!fala.falou && !fala.silenciou && texto && !ehSilencio(texto)) {
+        if ((!fala.falou || acaoConfirmada && !fala.publicou) && !fala.silenciou && texto && !ehSilencio(texto)) {
+            if (simulaChamadaFerramenta(texto) || anunciaAcao(texto) && !acaoConfirmada) {
+                this.registro.promessaRetida?.(vez.reservadoCom ? 'reservado' : 'geral');
+                throw new Error('A fala anunciou uma ação sem confirmação. Execute a ferramenta antes de responder.');
+            }
             if (vez.reservadoCom) {
                 await this.registro.responderReservado?.(funcionario.id, vez.reservadoCom, texto);
                 fala.falou = true;
-            } else this.falarDoAgente(funcionario.id, texto);
+            } else this.publicarFalaDoAgente(funcionario.id, texto, [], acaoConfirmada);
         }
         if (vez.reservadoCom && !fala.falou) this.registro.reservadoSemResposta?.(funcionario.id, vez.reservadoCom);
         return fala;

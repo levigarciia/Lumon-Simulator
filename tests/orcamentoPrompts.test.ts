@@ -26,6 +26,7 @@ async function estabilizar() {
 
 test('instruções e prompts por turno respeitam o orçamento de caracteres', async () => {
     const estado = estadoInicial();
+    estado.cota.grupos = 2;
     const equipe = [
         contratar('lider', 'Alex', 'lider', 'mesa1'),
         contratar('dev', 'Bia', 'desenvolvedor', 'mesa2'),
@@ -56,6 +57,11 @@ test('instruções e prompts por turno respeitam o orçamento de caracteres', as
         const [geral, trabalho] = sessoes;
         expect(geral!.instrucoes).toContain(instrucoesPausas);
         expect(trabalho!.instrucoes).toContain(instrucoesPausas);
+        expect(geral!.instrucoes).toContain('A Diretoria acolhe o tempo livre');
+        expect(trabalho!.instrucoes).toContain('A Diretoria acolhe o tempo livre');
+        expect(geral!.prompts[0]).toContain('2/18 grupos aprovados hoje.');
+        expect(geral!.prompts[0]).not.toContain('A plenitude exige');
+        expect(geral!.prompts[0]).not.toContain('A Diretoria aguarda os frutos');
         const medidas = {
             instrucoesGeral: geral!.instrucoes.length,
             promptGeral: geral!.prompts[0]!.length,

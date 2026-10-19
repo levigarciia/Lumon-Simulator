@@ -1,4 +1,5 @@
 import { encontrarRota } from './caminhos';
+import { criarVerificadorCirculacao } from './circulacao';
 import {
     celulaDeUso, celulaDoPonto, celulaEntrada, criarVerificadorLivre, type Celula, type Ponto, type Sala,
 } from './escritorio';
@@ -34,7 +35,8 @@ export function escolherLugarEncontro(
             }
         }
     }
+    const circulacao = criarVerificadorCirculacao(sala);
     return candidatos.sort((a, b) => a.custo - b.custo).find((destino) =>
-        encontrarRota(origemAutor, destino.autor, livre) !== null
-            && encontrarRota(origemColega, destino.colega, livre) !== null);
+        encontrarRota(origemAutor, destino.autor, circulacao) !== null
+            && encontrarRota(origemColega, destino.colega, circulacao) !== null);
 }

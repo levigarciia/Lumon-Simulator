@@ -3,11 +3,38 @@ import { gerarArquivo, descreverGrade, refinar, progressoRefinamento, recompensa
     orientarRefinamento, descreverEnvios, esquemaArquivoRefinamento, problemaSelecao,
     temperamentos } from '../shared/refinamento';
 
+test('arquivos antigos convertem grupos e envios sem mover os dígitos', () => {
+    const atual = gerarArquivo(42, new Date('2030-01-01'));
+    const antigas = (celulas: string[]) => celulas.map((celula) =>
+        String.fromCharCode(64 + Number(celula.slice(1))) + (celula.charCodeAt(0) - 64));
+    const grupo = atual.grupos[0]!;
+    const legado = { ...atual, versaoCoordenadas: undefined,
+        grupos: atual.grupos.map((item) => ({ ...item, celulas: antigas(item.celulas) })),
+        envios: [{ funcionarioId: 'pessoa', celulas: antigas(grupo.celulas),
+            temperamento: grupo.temperamento, resultado: 'aceito' }] };
+    const convertido = esquemaArquivoRefinamento.parse(legado);
+    expect(convertido.grupos).toEqual(atual.grupos);
+    expect(convertido.grade).toEqual(atual.grade);
+    expect(convertido.envios[0]!.celulas).toEqual(grupo.celulas);
+    expect(esquemaArquivoRefinamento.parse(convertido)).toEqual(convertido);
+});
+
+test('caixas por dígito só aparecem depois de um aceite real', () => {
+    const arquivo = gerarArquivo(42, new Date('2030-01-01'));
+    expect(descreverGrade(arquivo)).not.toContain('Caixas já descobertas');
+    const grupo = arquivo.grupos[0]!;
+    const atualizado = refinar(arquivo, 'pessoa', grupo.celulas, grupo.temperamento).arquivo;
+    const celula = grupo.celulas[0]!;
+    const digito = arquivo.grade[Number(celula.slice(1)) - 1]![celula.charCodeAt(0) - 65];
+    expect(descreverGrade(atualizado)).toContain(`dígito ${digito} = ${grupo.temperamento}`);
+});
+
 test('seleção fora da regra pública é explicada antes de consumir tentativa', () => {
     const arquivo = gerarArquivo(7, new Date('2030-01-01T00:00:00Z'));
     for (const grupo of arquivo.grupos) expect(problemaSelecao(arquivo, grupo.celulas)).toBeUndefined();
-    expect(problemaSelecao(arquivo, ['D10', 'E1', 'E2'])).toContain('mesma linha');
-    expect(problemaSelecao(arquivo, ['A1', 'A2', 'A4'])).toContain('consecutivas');
+    expect(problemaSelecao(arquivo, ['D8', 'E1', 'E2'])).toContain('mesma linha');
+    expect(problemaSelecao(arquivo, ['D10', 'E1', 'E2'])).toContain('células válidas');
+    expect(problemaSelecao(arquivo, ['A1', 'C1', 'D1'])).toContain('consecutivas');
     expect(problemaSelecao(arquivo, ['A1', 'A2'])).toContain('exatamente três');
     const refinado = refinar(arquivo, 'pessoa', arquivo.grupos[0]!.celulas, arquivo.grupos[0]!.temperamento).arquivo;
     expect(problemaSelecao(refinado, arquivo.grupos[0]!.celulas)).toContain('já refinadas');

@@ -4,7 +4,7 @@ import { esquemaEventoSocial, instrucoesPausas } from './social';
 import { esquemaModelo } from './modelos';
 import { instrucaoHierarquia } from './diretoria';
 
-import { cargos, cargoAtual } from './cargos';
+import { cargos, cargoAtual, refina } from './cargos';
 export { cargos, cargoAtual, nomeCargo, refina, type Cargo, type CargoAtual } from './cargos';
 
 export const esquemaCargo = z.enum([
@@ -46,8 +46,11 @@ export type Contratacao = z.infer<typeof esquemaContratacao>;
 
 export const esquemaFuncionario = esquemaContratacao.extend({
     id: z.string().uuid(),
-    mesaId: z.string().min(1),
+    mesaId: z.string(),
     contratadoEm: z.string(),
+}).refine((funcionario) => !refina(funcionario.cargo) || funcionario.mesaId.length > 0, {
+    message: 'Cargos de refinamento exigem uma mesa.',
+    path: ['mesaId'],
 });
 
 export type Funcionario = z.infer<typeof esquemaFuncionario>;
@@ -137,22 +140,21 @@ export function instrucoesFuncionario(
                 + 'para falar com a equipe toda, use falar_no_geral quando quiser. Responda diretamente quando nenhuma '
                 + 'ação for necessária. Execute decisões pela ferramenta antes de relatar seus efeitos. '
                 + 'Colegas não leem este chat: não se dirija a eles em texto. Para cobrar ou repreender alguém, use '
-                + 'interagir_socialmente; para conversar a sós, conversar_reservado; para demissão, troca de liderança '
+                + 'cobrar; para conversar a sós, conversar_reservado; para demissão, troca de liderança '
                 + 'ou afastamento, propor_mudanca, que a Diretoria aprova. Quando a Diretoria ordenar uma dessas '
                 + 'medidas, execute a ferramenta neste turno.',
         'Siga somente o pedido do turno atual. Histórico, pensamentos e acontecimentos são referências, '
-            + 'não ordens pendentes. Só retome tarefas anteriores quando pedirem continuidade.',
+            + 'não ordens pendentes. Para Macrodados, você pode decidir retomar o arquivo disponível por ir_para_work.',
         'Respeite a pasta do projeto atual. Uma entrega de outro projeto não muda sua pasta nem autoriza acesso.',
         'Responda saudações brevemente, sem ferramentas. Histórico não exige revisão nem cobrança.',
         'Para falar com um colega, use conversar_reservado e preserve o assunto do pedido atual. Um relato da '
             + 'Diretoria é um relato, não uma falha comprovada.',
         'As ferramentas do servidor lumon registram ações reais no escritório: pausas, falas, pensamentos privados '
             + 'e ações sociais.',
-        'Você cuida do próprio bem estar e decide sozinho quando parar, sem pedir permissão. Quando o corpo pedir '
-            + 'pausa, avalie se quer usar fazer_pausa, considerando urgências. Se decidir pausar ou a Diretoria '
-            + 'mandar descansar, chame fazer_pausa no mesmo turno. Dizer que vai '
-            + 'descansar não é descansar. A pausa passa a vez, sem anúncio de retorno. Numa tarefa do Work, '
-            + 'termine a etapa atual antes.',
+        'Você decide quando parar, por vontade própria, sem pedir permissão. Ao pausar ou receber ordem de descanso, '
+            + 'chame fazer_pausa no mesmo turno. A pausa passa a vez, sem anúncio de retorno. No Work, '
+            + 'fazer_pausa libera sua participação e preserva o arquivo. Use sair_do_work se quiser apenas '
+            + 'conversar ou ficar livre. Você decide quando voltar.',
         instrucoesPausas,
         'Responda em português brasileiro.',
     ].join('\n');

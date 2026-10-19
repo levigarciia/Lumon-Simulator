@@ -13,6 +13,7 @@ import { gerarArquivo, refinar } from '../shared/refinamento';
 import { necessidadesIniciais } from '../shared/necessidades';
 import { atividadeDepartamento } from '../shared/atividadeDepartamento';
 import { ServidorMcp } from '../electron/services/mcp';
+import { concluirAcao, recusarAcao } from '../electron/services/ferramentas/resultado';
 
 async function preparar() {
     const estado = estadoInicial();
@@ -79,7 +80,7 @@ test('catálogo MCP de cada provedor oferece ações da partida e mantém a aval
                     await cliente.connect(new StreamableHTTPClientTransport(new URL(url)));
                     const nomes = (await cliente.listTools()).tools.map((item) => item.name);
                     expect(nomes).toContain('ver_escritorio');
-                    expect(nomes).toContain('planejar_acao');
+                    expect(nomes).not.toContain('planejar_acao');
                     const externas = ['executar_comando', 'escrever_arquivo', 'registrar_validacao', 'aprovarEntrega'];
                     for (const nome of externas) {
                         expect(nomes).not.toContain(nome);
@@ -90,6 +91,108 @@ test('catálogo MCP de cada provedor oferece ações da partida e mantém a aval
             }
         }
     } finally { caso.escritorio.encerrar(); }
+});
+
+test('nenhuma ação pelo MCP encerra a reação e remove a resposta pendente', async () => {
+    const caso = await preparar();
+    const turnos: string[] = [];
+    caso.escritorio['geral']['abrirSessao'] = (pessoa) => ({
+        enviar: async (_prompt, ouvinte, _sinal, opcoes) => {
+            turnos.push(`${pessoa.id}:${opcoes?.exigirFerramenta ? 'reacao' : 'fala'}`);
+            const cliente = new Client({ name: 'teste', version: '1' });
+            try {
+                await cliente.connect(new StreamableHTTPClientTransport(
+                    new URL(await caso.escritorio['mcp'].urlDe(pessoa.id, 'geral')),
+                ));
+                const resultado = await cliente.callTool({ name: 'nenhuma_acao', arguments: {} });
+                expect(resultado.isError).not.toBe(true);
+                expect(resultado.structuredContent).toEqual({ codigo: 'vez_encerrada', terminal: true });
+                const indevida = await cliente.callTool({ name: 'atualizar_pensamento',
+                    arguments: { pensamento: 'Não deveria executar depois de passar a vez.' } });
+                expect(indevida.isError).toBe(true);
+                ouvinte.texto('Esta fala atrasada deve ser descartada.');
+            } finally { await cliente.close(); }
+        }, encerrar: () => {},
+    });
+    try {
+        caso.escritorio.enviarGeral(`@${caso.lider.nome}, confira a entrega.`);
+        await aguardar(() => turnos.length > 0 && !caso.escritorio['geral'].emExecucao(caso.lider.id));
+        expect(turnos).toEqual([`${caso.lider.id}:reacao`]);
+        expect(caso.escritorio.mensagensGeral().some((item) => item.texto.includes('fala atrasada'))).toBe(false);
+        expect(caso.escritorio.publico().pensamentos[caso.lider.id]).toBeUndefined();
+    } finally { caso.escritorio.encerrar(); }
+});
+
+test('consulta unificada por ID preserva audiência e oculta impactos privados', async () => {
+    const caso = await preparar();
+    const privado = caso.social.registrar({ tipo: 'reservado', autorId: caso.colega.id,
+        alvoId: caso.terceiro.id, texto: 'Conversa que o líder não recebeu.',
+        alcance: 'reservado', ouvintes: [caso.colega.id, caso.terceiro.id], fontes: [] }, false);
+    const cliente = new Client({ name: 'consulta', version: '1' });
+    try {
+        await cliente.connect(new StreamableHTTPClientTransport(
+            new URL(await caso.escritorio['mcp'].urlDe(caso.lider.id, 'chat')),
+        ));
+        const publica = await cliente.callTool({ name: 'consultar', arguments: { acontecimento: caso.fonte.id } });
+        expect(publica.isError).toBe(false);
+        expect(JSON.stringify(publica)).toContain(caso.fonte.texto);
+        expect(JSON.stringify(publica)).not.toContain('impactosRelacao');
+        const inacessivel = await cliente.callTool({ name: 'consultar', arguments: { acontecimento: privado.id } });
+        expect(inacessivel.isError).toBe(true);
+        expect(JSON.stringify(inacessivel)).not.toContain(privado.texto);
+        const misturada = await cliente.callTool({ name: 'consultar',
+            arguments: { acontecimento: caso.fonte.id, busca: 'outro assunto' } });
+        expect(misturada.isError).toBe(true);
+    } finally { await cliente.close(); caso.escritorio.encerrar(); }
+});
+
+test('resumo inventado de Macrodados é substituído pelos envios registrados', async () => {
+    const caso = await preparar();
+    caso.escritorio['expediente']['abrirSessao'] = () => ({
+        enviar: async (_prompt, ouvinte) => ouvinte.texto('Grupo aceito na caixa Alegria. Nenhuma pendência.'),
+        encerrar: () => {},
+    });
+    try {
+        expect(caso.escritorio['revisarTrabalho']()).toContain('Cota do departamento: 0/18');
+        expect(caso.escritorio.iniciarRefinamento(1).ok).toBe(true);
+        await aguardar(() => caso.escritorio.publico().trabalhos[0]?.estado === 'pausado');
+        const resultado = caso.escritorio.publico().trabalhos[0]!.resultado;
+        expect(resultado).toContain('Progresso: 0%');
+        expect(resultado).toContain('Nenhum envio registrado');
+        expect(resultado).not.toContain('Grupo aceito');
+    } finally { caso.escritorio.encerrar(); }
+});
+
+test('schema MCP aceita as dez colunas e sinaliza recusas de envio como erro', async () => {
+    const recebidas: string[][] = [];
+    const servidor = new ServidorMcp({
+        verEscritorio: () => '', fazerPausa: async () => '', falarNoGeral: () => '',
+        atualizarPensamento: () => '', delegar: async () => recusarAcao('Delegação recusada: seleção inválida.'),
+        refinar: (_id, celulas) => {
+            recebidas.push(celulas);
+            return recebidas.length === 1 ? concluirAcao('Envio: aceito.')
+                : recusarAcao('Envio não registrado: células repetidas.');
+        },
+    });
+    const cliente = new Client({ name: 'teste', version: '1' });
+    try {
+        await cliente.connect(new StreamableHTTPClientTransport(new URL(await servidor.urlDe('autor', 'trabalho'))));
+        const aceito = await cliente.callTool({ name: 'refinar',
+            arguments: { celulas: ['H5', 'I5', 'J5'], temperamento: 'alegria' } });
+        expect(aceito.isError).not.toBe(true);
+        expect(recebidas[0]).toEqual(['H5', 'I5', 'J5']);
+        const recusado = await cliente.callTool({ name: 'refinar',
+            arguments: { celulas: ['H5', 'H5', 'H5'], temperamento: 'alegria' } });
+        expect(recusado.isError).toBe(true);
+        for (const celula of ['A9', 'A10', 'K1']) {
+            const invalido = await cliente.callTool({ name: 'refinar',
+                arguments: { celulas: ['A1', 'B1', celula], temperamento: 'alegria' } });
+            expect(invalido.isError).toBe(true);
+        }
+        expect(recebidas).toHaveLength(2);
+        const delegacao = await cliente.callTool({ name: 'delegar', arguments: { funcionario: 'colega', tarefa: 'Teste' } });
+        expect(delegacao.isError).toBe(true);
+    } finally { await cliente.close(); servidor.encerrar(); }
 });
 
 test('correção de arquivo vencido recebe prazo próprio e mantém a identidade de recompensa', async () => {
@@ -108,6 +211,10 @@ test('correção de arquivo vencido recebe prazo próprio e mantém a identidade
         expect(caso.escritorio.iniciarRefinamento(1).ok).toBe(true);
         await aguardar(() => liberar.length === 1);
         const arquivo = Object.values(caso.escritorio['estado'].refinamentos)[0]!;
+        const revisao = caso.escritorio['revisarTrabalho']();
+        expect(revisao).toContain(`Arquivo ${arquivo.nome}, progresso 0%.`);
+        expect(revisao).toContain('Cota do departamento: 0/18');
+        expect(revisao).toContain('Etapas:');
         const grupo = arquivo.grupos[0]!;
         caso.escritorio['refinarArquivo'](caso.lider.id, grupo.celulas, grupo.temperamento);
         arquivo.prazo = new Date(0).toISOString();
@@ -120,9 +227,10 @@ test('correção de arquivo vencido recebe prazo próprio e mantém a identidade
         const corrigido = caso.escritorio['estado'].refinamentos[arquivo.id]!;
         expect(Date.parse(corrigido.prazo)).toBeGreaterThan(Date.now());
         expect(corrigido.rodadas).toHaveLength(1);
-        const pendente = corrigido.grupos.find((item) => !item.refinadoPor)!;
-        expect(caso.escritorio['refinarArquivo'](caso.lider.id, pendente.celulas, pendente.temperamento))
-            .toContain('aceito');
+        for (const pendente of corrigido.grupos.filter((item) => !item.refinadoPor)) {
+            expect(caso.escritorio['refinarArquivo'](caso.lider.id, pendente.celulas, pendente.temperamento))
+                .toContain('aceito');
+        }
         liberar[1]!();
         await aguardar(() => caso.escritorio['orquestracao']['ativos'].size === 0);
         const entrega = caso.escritorio.publico().trabalhos.at(-1)!;
@@ -132,7 +240,7 @@ test('correção de arquivo vencido recebe prazo próprio e mantém a identidade
         const moedas = caso.escritorio.publico().moedas;
         expect(caso.escritorio.aprovarEntrega(entrega.id).ok).toBe(true);
         expect(caso.escritorio.publico().moedas).toBe(moedas);
-        expect(caso.escritorio.publico().cota.grupos).toBe(2);
+        expect(caso.escritorio.publico().cota.grupos).toBe(6);
     } finally { caso.escritorio.encerrar(); }
 });
 
@@ -316,7 +424,7 @@ test('estado terminal do MCP independe das palavras da resposta', async () => {
     try {
         await cliente.connect(new StreamableHTTPClientTransport(new URL(await servidor.urlDe('autor', 'trabalho'))));
         const resultado = await cliente.callTool({ name: 'abrir_arquivo', arguments: {} });
-        expect(resultado.structuredContent).toEqual({ codigo: 'prazo_encerrado', terminal: true });
+        expect(resultado.structuredContent).toMatchObject({ codigo: 'prazo_encerrado', terminal: true });
         expect(JSON.stringify(resultado.content)).not.toContain('Prazo encerrado');
     } finally { await cliente.close(); servidor.encerrar(); }
 });

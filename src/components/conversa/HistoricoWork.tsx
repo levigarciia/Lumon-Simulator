@@ -11,7 +11,8 @@ import { AvaliacaoEntrega } from './AvaliacaoEntrega';
 import type { Resultado } from '../../../shared/ponte';
 
 const rotulos = {
-    trabalhando: 'Em andamento', concluido: 'Execução encerrada', falhou: 'Falhou', interrompido: 'Interrompido',
+    trabalhando: 'Em andamento', pausado: 'Período encerrado, arquivo preservado',
+    concluido: 'Execução encerrada', falhou: 'Falhou', interrompido: 'Interrompido',
 };
 
 function RespostaAnterior({ trabalho }: { trabalho: RegistroTrabalho }) {

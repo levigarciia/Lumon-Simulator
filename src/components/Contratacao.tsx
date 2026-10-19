@@ -16,6 +16,7 @@ import {
 } from '../../shared/funcionarios';
 import type { Resultado } from '../../shared/ponte';
 import { catalogoModelos, formatarTamanho } from '../../shared/modelos';
+import { refina } from '../../shared/cargos';
 import { lumon } from '../services/ponte';
 import { Boneco, usePartesBoneco } from './cena/Boneco';
 import { Amostras, Botao, Campo, classeEntrada, Janela, Segmentos } from './ui';
@@ -88,7 +89,7 @@ export function Contratacao({ mesaLivre, aoFechar, aoAbrirLoja, executar, editan
 
     const modelo = modelos.find((candidato) => chaveModelo(candidato) === modeloChave);
     const mudarAparencia = (mudanca: Partial<Aparencia>) => setAparencia((atual) => ({ ...atual, ...mudanca }));
-    const podeSalvar = !!nome.trim() && !!modelo && (!!editando || mesaLivre);
+    const podeSalvar = !!nome.trim() && !!modelo && (!refina(cargo) || mesaLivre || !!editando?.mesaId);
     const salvar = async () => {
         if (!modelo) return;
         const dados: DadosContratacao = { nome, cargo, modelo, aparencia, autonomia: false };
@@ -168,7 +169,7 @@ export function Contratacao({ mesaLivre, aoFechar, aoAbrirLoja, executar, editan
                                 Salvar reinicia a sessão do harness. O histórico continua.
                             </span>
                         )}
-                        {!editando && !mesaLivre && (
+                        {refina(cargo) && !mesaLivre && !editando?.mesaId && (
                             <>
                                 <span className="mr-auto text-[12px] text-[#f0b44c]">Não há mesa livre.</span>
                                 <Botao onClick={aoAbrirLoja}>Abrir loja</Botao>

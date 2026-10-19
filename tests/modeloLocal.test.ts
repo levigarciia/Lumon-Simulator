@@ -12,6 +12,7 @@ import type { OuvinteTurno } from '../electron/services/harness/tipos';
 import { resolverModeloLocal, type ModeloCatalogo } from '../shared/modelos';
 import { backendParaGpus, escolherDispositivo, interpretarDispositivos } from '../electron/services/dispositivosMotor';
 import { ServidorMcp } from '../electron/services/mcp';
+import { concluirAcao, recusarAcao } from '../electron/services/ferramentas/resultado';
 
 const sinal = () => new AbortController().signal;
 const temporaria = () => mkdtemp(join(tmpdir(), 'lumon-modelo-teste-'));
@@ -26,6 +27,91 @@ function ouvinte(): OuvinteTurno {
 }
 
 describe('modelo local', () => {
+    test('fala social transmite fragmentos antes da conclusão sem exigir saída JSON', async () => {
+        const fala = 'Bom dia, equipe. Como vocês estão?';
+        const publicadas: string[] = [];
+        let inferencias = 0;
+        const servidor = new ServidorMcp({
+            verEscritorio: () => '', fazerPausa: async () => '', falarNoGeral: () => '',
+            atualizarPensamento: () => '', delegar: async () => '',
+        });
+        const motor = { usar: async (_id: string, _sinal: AbortSignal,
+            executar: (ativo: Pick<MotorLocal, 'estado' | 'completar'>) => Promise<unknown>) => executar({
+            estado: { fase: 'pronto', detalhe: 'Teste', contexto: 16384 },
+            completar: async (corpo) => {
+                inferencias++;
+                expect(corpo.response_format).toBeUndefined();
+                expect(corpo.grammar).toBeUndefined();
+                expect(corpo.json_schema).toBeUndefined();
+                expect(corpo.tools).toContainEqual(expect.objectContaining({
+                    function: expect.objectContaining({ name: 'atualizar_pensamento' }),
+                }));
+                expect(corpo.tool_choice).toBe('auto');
+                let parte = 0;
+                const codificador = new TextEncoder();
+                return new Response(new ReadableStream<Uint8Array>({
+                    pull(controlador) {
+                        if (parte === 0) {
+                            controlador.enqueue(codificador.encode('data: '
+                                + JSON.stringify({ choices: [{ delta: { content: 'Bom dia, equipe.' } }] })
+                                + '\n\n'));
+                        } else {
+                            expect(publicadas).toEqual(['Bom dia, equipe.']);
+                            controlador.enqueue(codificador.encode('data: '
+                                + JSON.stringify({ choices: [{ delta: { content: ' Como vocês estão?' } }] })
+                                + '\n\ndata: [DONE]\n\n'));
+                            controlador.close();
+                        }
+                        parte++;
+                    },
+                }, { highWaterMark: 0 }));
+            },
+        }) } as Pick<MotorLocal, 'usar'>;
+        const sessao = criarSessaoLocal({ modelo: 'qwen3.5-9b-q4', pasta: '.', autonomia: false,
+            modo: 'personagem', atividade: 'social', instrucoes: 'Você é Gwen.',
+            mcpUrl: await servidor.urlDe('gwen', 'geral') }, motor);
+        try {
+            await sessao.enviar('Bom dia.', { ...ouvinte(), texto: (texto) => publicadas.push(texto) }, sinal());
+            expect(publicadas).toEqual(['Bom dia, equipe.', fala]);
+            expect(inferencias).toBe(1);
+        } finally { sessao.encerrar(); servidor.encerrar(); }
+    });
+
+    test('entrada no Work encerra o chat sem outra inferência nem executar chamadas posteriores', async () => {
+        let inferencias = 0;
+        let entradas = 0;
+        let pensamentos = 0;
+        const servidor = new ServidorMcp({
+            verEscritorio: () => '', fazerPausa: async () => '', falarNoGeral: () => '', delegar: async () => '',
+            atualizarPensamento: () => { pensamentos++; return ''; },
+            irParaWork: () => {
+                entradas++;
+                return concluirAcao('Entrada agendada.', 'entrada_work_agendada', { terminal: true });
+            },
+        });
+        const motor = { usar: async (_id: string, _sinal: AbortSignal,
+            executar: (ativo: Pick<MotorLocal, 'estado' | 'completar'>) => Promise<unknown>) => executar({
+            estado: { fase: 'pronto', detalhe: 'Teste', contexto: 16384 },
+            completar: async () => {
+                inferencias++;
+                return sse('', [
+                    { index: 0, id: 'entrar', function: { name: 'ir_para_work', arguments: '{}' } },
+                    { index: 1, id: 'pensar', function: { name: 'atualizar_pensamento',
+                        arguments: JSON.stringify({ pensamento: 'Não deve executar.' }) } },
+                ]);
+            },
+        }) } as Pick<MotorLocal, 'usar'>;
+        const sessao = criarSessaoLocal({ modelo: 'qwen3.5-9b-q4', pasta: '.', autonomia: false,
+            modo: 'personagem', instrucoes: 'Decida se quer trabalhar.',
+            mcpUrl: await servidor.urlDe('refinador', 'chat') }, motor);
+        try {
+            await sessao.enviar('Há um arquivo disponível.', ouvinte(), sinal());
+            expect(inferencias).toBe(1);
+            expect(entradas).toBe(1);
+            expect(pensamentos).toBe(0);
+        } finally { sessao.encerrar(); servidor.encerrar(); }
+    });
+
     test('pausa passa a vez sem nova inferência nem anúncio automático de retorno', async () => {
         let pausas = 0;
         let inferencias = 0;
@@ -108,7 +194,8 @@ describe('modelo local', () => {
                 if (limites.length === 1) return new Response('data: '
                     + JSON.stringify({ choices: [{ delta: { content: '{"tipo":"acao"' }, finish_reason: 'length' }] })
                     + '\n\n');
-                return sse('', [{ index: 0, id: 'pensamento', function: { name: 'atualizar_pensamento',
+                return sse('Minha reação privada não deve aparecer.', [{ index: 0, id: 'pensamento',
+                    function: { name: 'atualizar_pensamento',
                     arguments: JSON.stringify({ pensamento: 'Vou tratar o assunto com o líder.' }) } }]);
             },
         }) } as Pick<MotorLocal, 'usar'>;
@@ -124,12 +211,78 @@ describe('modelo local', () => {
         } finally { sessao.encerrar(); servidor.encerrar(); }
     });
 
-    test('turno social usa chamadas de ferramenta nativas sem publicar o protocolo', async () => {
+    for (const comFerramenta of [false, true]) {
+        test(`fala social espera o fim do streaming para validar promessa, com ferramenta ${comFerramenta}`,
+            async () => {
+                const textos: string[] = [];
+                const fragmentos = ['Diretoria, agradeço a confiança. Vou', ' fazer uma pausa', ' para comer.'];
+                const previas = fragmentos.map((_fragmento, indice) => fragmentos.slice(0, indice + 1).join(''));
+                let inferencias = 0;
+                let pausas = 0;
+                const servidor = new ServidorMcp({
+                    verEscritorio: () => '', fazerPausa: async () => {
+                        expect(textos.slice(0, previas.length)).toEqual(previas);
+                        expect(textos.at(-1)).toBe('');
+                        pausas++;
+                        return 'Pausa iniciada.';
+                    },
+                    falarNoGeral: () => '', atualizarPensamento: () => '', delegar: async () => '',
+                });
+                const motor = { usar: async (_id: string, _sinal: AbortSignal,
+                    executar: (ativo: Pick<MotorLocal, 'estado' | 'completar'>) => Promise<unknown>) => executar({
+                    estado: { fase: 'pronto', detalhe: 'Teste', contexto: 16384 },
+                    completar: async () => {
+                        if (++inferencias > 1) {
+                            expect(textos).toEqual([...previas, '']);
+                            return sse('Obrigada pela confiança.');
+                        }
+                        let parte = 0;
+                        const codificador = new TextEncoder();
+                        return new Response(new ReadableStream<Uint8Array>({
+                            pull(controlador) {
+                                expect(textos).toEqual(previas.slice(0, parte));
+                                if (parte < fragmentos.length) {
+                                    controlador.enqueue(codificador.encode('data: ' + JSON.stringify({
+                                        choices: [{ delta: { content: fragmentos[parte++] } }],
+                                    }) + '\n\n'));
+                                    return;
+                                }
+                                const chamadas = comFerramenta ? [{ index: 0, id: 'pausa', function: {
+                                    name: 'fazer_pausa', arguments: '{"atividade":"comendo","minutos":5}',
+                                } }] : undefined;
+                                controlador.enqueue(codificador.encode('data: ' + JSON.stringify({
+                                    choices: [{ delta: { tool_calls: chamadas }, finish_reason: 'stop' }],
+                                }) + '\n\ndata: [DONE]\n\n'));
+                                controlador.close();
+                            },
+                        }, { highWaterMark: 0 }));
+                    },
+                }) } as Pick<MotorLocal, 'usar'>;
+                const sessao = criarSessaoLocal({ modelo: 'qwen3.5-9b-q4', pasta: '.', autonomia: false,
+                    modo: 'personagem', atividade: 'social', instrucoes: 'Você é Kim.',
+                    mcpUrl: await servidor.urlDe('kim', 'chat') }, motor);
+                try {
+                    await sessao.enviar('Parabéns, Kim.', {
+                        ...ouvinte(), texto: (texto) => textos.push(texto),
+                    }, sinal());
+                    expect(inferencias).toBe(comFerramenta ? 1 : 2);
+                    expect(pausas).toBe(comFerramenta ? 1 : 0);
+                    expect(textos).toEqual([...previas, '',
+                        comFerramenta ? previas.at(-1)! : 'Obrigada pela confiança.']);
+                } finally { sessao.encerrar(); servidor.encerrar(); }
+            });
+    }
+
+    test('turno social retira a prévia após a geração e confirma a fala junto com o resultado', async () => {
         let inferencias = 0;
         let pausas = 0;
         const textos: string[] = [];
         const servidor = new ServidorMcp({
-            verEscritorio: () => '', fazerPausa: async () => { pausas++; return 'Pausa concluída.'; },
+            verEscritorio: () => '', fazerPausa: async () => {
+                expect(textos.at(-1)).toBe('');
+                pausas++;
+                return 'Pausa concluída.';
+            },
             falarNoGeral: () => '', atualizarPensamento: () => '', delegar: async () => '',
         });
         const motor = { usar: async (_id: string, _sinal: AbortSignal,
@@ -142,7 +295,7 @@ describe('modelo local', () => {
                     function: expect.objectContaining({ name: 'fazer_pausa' }),
                 }));
                 expect(corpo.tool_choice).toBe('auto');
-                return sse('', [{ index: 0, id: 'pausa', function: { name: 'fazer_pausa',
+                return sse('Texto provisório.', [{ index: 0, id: 'pausa', function: { name: 'fazer_pausa',
                     arguments: JSON.stringify({ atividade: 'comendo', minutos: 5 }) } }]);
             },
         }) } as Pick<MotorLocal, 'usar'>;
@@ -152,7 +305,7 @@ describe('modelo local', () => {
         try {
             await sessao.enviar('Você está livre.', { ...ouvinte(), texto: (texto) => textos.push(texto) }, sinal());
             expect(pausas).toBe(1);
-            expect(textos).toEqual([]);
+            expect(textos).toEqual(['Texto provisório.', '', 'Texto provisório.']);
             expect(inferencias).toBe(1);
         } finally { sessao.encerrar(); servidor.encerrar(); }
     });
@@ -215,12 +368,12 @@ describe('modelo local', () => {
                 completar: async () => {
                     inferencias++;
                     if (inferencias > 1) throw new Error('A ação já concluiu a participação.');
-                    const entrada = { funcionario: 'colega', acao: acaoSocial, mensagem: 'Mensagem social.',
+                    const entrada = { funcionario: 'colega', mensagem: 'Mensagem social.',
                         alcance: 'publico', fontes: ['fonte'] };
                     return sse('', [
-                        { index: 0, id: 'acao', function: { name: 'interagir_socialmente',
+                        { index: 0, id: 'acao', function: { name: acaoSocial,
                             arguments: JSON.stringify(entrada) } },
-                        { index: 1, id: 'repeticao', function: { name: 'interagir_socialmente',
+                        { index: 1, id: 'repeticao', function: { name: acaoSocial,
                             arguments: JSON.stringify(entrada) } },
                         { index: 2, id: 'fala', function: { name: 'falar_no_geral',
                             arguments: JSON.stringify({ mensagem: 'Repetindo a ação.' }) } },
@@ -325,6 +478,8 @@ describe('modelo local', () => {
             expect(pedidos[1]).toContain('Você anunciou uma ação');
             expect(consertos).toBe(1);
             expect(textos.at(-1)).toBe('Consertada.');
+            expect(servidor.metricas.consultar().find((item) => item.nome === 'decisao_do_turno'))
+                .toMatchObject({ promessasRetidas: 1 });
         } finally { sessao.encerrar(); servidor.encerrar(); }
     });
 
@@ -450,12 +605,14 @@ describe('modelo local', () => {
         } finally { sessao.encerrar(); }
     });
 
-    test('retorno terminal da etapa retira ferramentas antes do resumo final', async () => {
+    test.each([false, true])('retorno terminal retira ferramentas antes do resumo, com recusa %s', async (recusada) => {
         const corpos: { tools?: unknown[] }[] = [];
         const servidor = new ServidorMcp({
             verEscritorio: () => '', fazerPausa: async () => '', falarNoGeral: () => '',
             atualizarPensamento: () => '', delegar: async () => '',
-            refinar: () => 'Envio: aceito. Sua etapa terminou. Resuma e devolva ao líder.',
+            refinar: () => recusada ? recusarAcao('Sua etapa terminou por seleções inválidas.')
+                : concluirAcao('Envio: aceito. Sua etapa terminou. Resuma e devolva ao líder.'),
+            estadoEtapa: () => ({ codigo: 'etapa_encerrada', terminal: true }),
         });
         const motor = { usar: async (_id: string, _sinal: AbortSignal,
             acao: (ativo: Pick<MotorLocal, 'estado' | 'completar'>) => Promise<unknown>) => acao({
@@ -473,8 +630,8 @@ describe('modelo local', () => {
             mcpUrl: await servidor.urlDe('gwen', 'trabalho') }, motor);
         try {
             await sessao.enviar('Refine o arquivo.', ouvinte(), sinal(), {
-                ferramentas: ['refinar'],
-                encerrarFerramentasQuando: (_nome, saida) => saida.includes('Sua etapa terminou'),
+                ferramentas: ['refinar'], exigirFerramentaAteConclusao: true,
+                encerrarFerramentasQuando: (_nome, _saida, estado) => estado?.terminal === true,
             });
             expect(corpos).toHaveLength(2);
             expect(corpos[0]?.tools).toHaveLength(1);
@@ -808,22 +965,22 @@ describe('modelo local', () => {
         const servidor = new ServidorMcp({
             verEscritorio: () => '', fazerPausa: async () => '', falarNoGeral: () => '',
             atualizarPensamento: () => '', delegar: async () => '',
-            interagir: () => { chamadas++; return 'Use um ID de acontecimento em fontes.'; },
+            interagir: () => { chamadas++; return recusarAcao('Use um ID de acontecimento em fontes.'); },
         });
         const motor = { usar: async (_id: string, _sinal: AbortSignal,
             acao: (ativo: Pick<MotorLocal, 'estado' | 'completar'>) => unknown) => acao({
             estado: { contexto: 32768, fase: 'pronto', detalhe: 'Teste' },
             completar: async () => recuperado ? sse('Olá!') : sse('', [{
                 index: 0, id: `tentativa${chamadas}`, function: {
-                    name: 'interagir_socialmente', arguments: JSON.stringify({
-                        funcionario: 'colega', acao: 'cobrar', mensagem: 'Corrija.', alcance: 'publico',
+                    name: 'cobrar', arguments: JSON.stringify({
+                        funcionario: 'colega', mensagem: 'Corrija.', alcance: 'publico',
                         fontes: ['colega'],
                     }),
                 },
             }]),
         }) } as Pick<MotorLocal, 'usar'>;
         const sessao = criarSessaoLocal({ modelo: 'qwen3.5-9b-q4', pasta: await temporaria(), autonomia: false,
-            instrucoes: 'Teste', modo: 'trabalho', mcpUrl: await servidor.urlDe('lider', 'trabalho') }, motor);
+            instrucoes: 'Teste', modo: 'conversa', mcpUrl: await servidor.urlDe('lider', 'chat') }, motor);
         try {
             await expect(sessao.enviar('Revise', { ...ouvinte(),
                 concluirFerramenta: (_id, erro) => { falhas.push(erro); },

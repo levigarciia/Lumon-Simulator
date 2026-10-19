@@ -1,3 +1,4 @@
+import { ferramentasDisponiveis } from './ferramentas';
 import { z } from 'zod';
 import type { Agente } from './agentes';
 import { esquemaPersonalidade, type Personalidade } from './personalidade';
@@ -32,6 +33,17 @@ export const esquemaRelacao = z.object({
 
 export const acoesSociais = ['cobrar', 'contestar', 'elogiar', 'desculpar', 'defender', 'fofocar'] as const;
 export const reacoesSociais = ['concordar', 'discordar', 'perdoar', 'desconfiar'] as const;
+export const esquemaPensamento = z.object({
+    pensamento: z.string().trim().min(1).max(600),
+    reacao: z.enum(reacoesSociais).optional(),
+    acontecimento: z.string().trim().min(1).max(80).optional(),
+    funcionario: z.string().trim().min(1).max(80).optional(),
+}).refine((dados) => dados.reacao ? !!(dados.acontecimento || dados.funcionario)
+    : !dados.acontecimento && !dados.funcionario, {
+    message: 'Para interpretar uma relação, informe reacao e acontecimento ou funcionario. '
+        + 'Para apenas pensar, informe somente pensamento.',
+});
+export type InterpretacaoPensamento = Omit<z.infer<typeof esquemaPensamento>, 'pensamento'>;
 export const tiposProposta = ['demissao', 'troca_lideranca', 'transferencia', 'sala_descanso', 'promocao'] as const;
 export const nomesProposta = {
     demissao: 'Demissão', troca_lideranca: 'Troca de cargo', transferencia: 'Transferência',
@@ -107,13 +119,13 @@ export type AcaoSocial = typeof acoesSociais[number];
 export type ReacaoSocial = typeof reacoesSociais[number];
 export type TipoProposta = typeof tiposProposta[number];
 
-export const ferramentasConversaNaPausa: readonly string[] = [
-    'ver_escritorio', 'conversar_reservado', 'interagir_socialmente', 'atualizar_pensamento',
-    'reagir_ao_acontecimento', 'consultar_acontecimento', 'consultar', 'silencio', 'nenhuma_acao',
-];
+export const ferramentasConversaNaPausa: readonly string[] = ferramentasDisponiveis('reservado', {
+    emPausa: true, parceiroDePausa: true,
+});
 
 /** Alinha decisões e reações sobre pausas em todos os canais do escritório. */
-export const instrucoesPausas = 'Pausas livres sem tarefa, em minutos reais. Em pausa: só conversar_reservado, '
+export const instrucoesPausas = 'Pausas por vontade própria, sem permissão nem mal estar, em minutos reais. '
+    + 'Em pausa: só conversar_reservado, '
     + 'nunca Geral, mesmo sem @. Necessidades: só se perguntarem ou afetar alguém. '
     + 'Cobre prejuízo no Work, nunca ócio ou contestação justa.';
 
@@ -124,12 +136,11 @@ export const instrucoesPausas = 'Pausas livres sem tarefa, em minutos reais. Em 
 export const instrucoesSociais = [
     'Relações mudam seu tom: afeto, implicância, frieza ou rispidez. Atrito é bem vindo quando nasce de algo '
         + 'real; não invente erros, testemunhas, falas ou apoios.',
-    'Para elogiar, contestar, defender ou cobrar alguém, use interagir_socialmente com IDs de ver_escritorio. '
+    'Para agir com colegas, use cobrar, contestar, elogiar, desculpar, defender ou fofocar com IDs de ver_escritorio. '
         + 'Relate só após sucesso.',
     'Relatos, boatos e fofocas são versões do autor. Somente a Diretoria executa propostas.',
     'Não repita elogios, concordâncias, prontidão ou ofertas de ajuda. Use @Nome para provocar uma resposta.',
     'Trate divergências e reparações no Geral. Leve intimidades e confidências para conversar_reservado.',
-    'Mantenha compromissos privados com planejar_acao. Cumpra por ações reais.',
     'Em quebras, suspeite, acuse ou defenda conforme sua personalidade e relações.',
     instrucoesPausas,
     'Reagir a pausas é opcional; para acompanhar, use fazer_pausa.',

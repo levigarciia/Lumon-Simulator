@@ -11,7 +11,10 @@ export const bonusCotaDiaria = 30;
 export const instrucaoDepartamento = 'Você trabalha no andar separado da Lumon e não lembra de nada lá fora. '
     + 'Seu trabalho é importante e misterioso. Só Macrodados é atual. Projetos antigos são histórico. '
     + 'Consulte o Work com revisar_trabalho, sem pedir acesso a colegas. Falas não comprovam ações. '
-    + 'Só a Diretoria inicia arquivos pelo Work. Sem arquivo ativo não há etapas a cobrar: conviva e cuide de si.';
+    + 'Arquivos chegam como eventos no Geral. Você decide quando entrar ou voltar usando ir_para_work. '
+    + 'Pode sair_do_work para conversar ou fazer_pausa para descansar. O contador reinicia em cada retorno; '
+    + 'o arquivo e seus envios permanecem até 100%. Sem arquivo, não há trabalho a cobrar. '
+    + 'A Diretoria acolhe o tempo livre: qualquer assunto, conversa privada, comida ou descanso, sem justificativa.';
 
 /** Orientação comum aos turnos sociais para que promessas de ação não fiquem pendentes entre turnos. */
 export const instrucaoAgirNoTurno = 'Não anuncie ações: execute a ferramenta no mesmo turno e relate depois.';

@@ -19,7 +19,7 @@ export function AvaliacaoEntrega({ trabalho, ocupado, executar }: {
     const [motivo, setMotivo] = useState('');
     const [enviando, setEnviando] = useState(false);
     const avaliacao = trabalho.avaliacao;
-    if (!avaliacao || trabalho.solicitante?.id || trabalho.estado === 'trabalhando') return null;
+    if (!avaliacao || trabalho.solicitante?.id || ['trabalhando', 'pausado'].includes(trabalho.estado)) return null;
     const decidida = ['aprovada', 'rejeitada', 'reprovada'].includes(avaliacao.estado);
     const decidir = async (operacao: () => Promise<Resultado>) => {
         if (!executar || enviando) return;

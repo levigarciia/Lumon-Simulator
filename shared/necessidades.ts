@@ -31,7 +31,7 @@ export const necessidadesIniciais: Necessidades = {
  * `folga` vale enquanto o funcionário está fora da sala; `sala_descanso`, durante a punição.
  */
 export type Situacao = 'trabalhando' | 'ocioso' | 'folga' | 'sala_descanso' | 'bem_estar'
-    | Exclude<Atividade, 'trabalhando' | 'andando' | 'conversando' | 'ausente'>;
+    | Exclude<Atividade, 'trabalhando' | 'andando' | 'conversando' | 'ausente' | 'observando'>;
 
 type Taxas = { energia: number; estresse: number; fome: number };
 

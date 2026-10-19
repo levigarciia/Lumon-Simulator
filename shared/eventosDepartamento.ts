@@ -15,7 +15,7 @@ export const agendaEventos = { intervaloMinimoMs: 8 * 60000, verificacaoMs: 6000
 export const duracaoAvariaMs = 3 * 60000;
 
 export const estresseVisita = 6;
-export const duracaoArquivoDiretoriaMinutos = 5;
+export const duracaoArquivoDiretoriaMinutos = 10;
 
 const pesosEventos: Record<TipoEventoDepartamento, number> = {
     visita_diretoria: 1,

@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Escritorio } from '../electron/services/escritorio';
@@ -48,13 +51,13 @@ function preparar() {
             ? { ...item, posicao: { x, z: 4 } } : item); } };
 }
 
-function escritorio() {
+function escritorio(pasta = 'C:/temporario') {
     const estado = estadoInicial();
     estado.funcionarios = equipe.map((pessoa) => ({ ...pessoa }));
     estado.sala = { ...salaVazia, itens: equipe.map((pessoa, indice) => ({
         id: pessoa.mesaId, tipo: 'mesa', celula: { x: 2 + indice * 3, z: 4 }, rotacao: 0,
     })) };
-    const instancia = new Escritorio(estado, () => {}, () => {}, 'C:/temporario');
+    const instancia = new Escritorio(estado, () => {}, () => {}, pasta);
     instancia['geral']['abrirSessao'] = () => ({ enviar: async () => {}, encerrar: () => {} });
     return instancia;
 }
@@ -100,6 +103,81 @@ test('promoção própria exige mérito e aprovação, preservando o contexto da
         expect(instancia.publico().carreira[id]?.merito).toBe(6);
         expect(instancia['contextoTurno'](id)).toContain('busque crescer');
     } finally {
+        instancia.encerrar();
+    }
+});
+
+test('promoção própria pelo MCP usa a identidade da sessão e continua exigindo evidências e aprovação', async () => {
+    const instancia = escritorio(await mkdtemp(join(tmpdir(), 'lumon-promocao-')));
+    const cliente = new Client({ name: 'teste-promocao', version: '1' });
+    const id = pedro.id;
+    try {
+        instancia['estado'].funcionarios.find((pessoa) => pessoa.id === id)!.cargo = 'estagiario';
+        const fonte = instancia['social'].registrar({ tipo: 'elogiar', autorId: helena.id, alvoId: id,
+            texto: 'Bom resultado no refinamento.', alcance: 'publico', ouvintes: [], fontes: [] }, false);
+        instancia['estado'].carreira[id] = { merito: 39 };
+        await cliente.connect(new StreamableHTTPClientTransport(
+            new URL(await instancia['mcp'].urlDe(id, 'chat'))));
+        const ferramenta = (await cliente.listTools()).tools.find((item) => item.name === 'propor_mudanca')!;
+        expect(ferramenta.inputSchema.required).not.toContain('funcionario');
+        const argumentos = { tipo: 'promocao', motivo: 'Quero assumir o cargo de Refinador.',
+            evidencias: [fonte.id] };
+        for (const funcionario of [pedro.nome, helena.id]) {
+            const incorreta = await cliente.callTool({ name: 'propor_mudanca',
+                arguments: { ...argumentos, funcionario } });
+            expect(incorreta.isError).toBe(true);
+            expect(JSON.stringify(incorreta)).toContain(`Seu ID é ${id}`);
+        }
+        const semEvidencias = await cliente.callTool({ name: 'propor_mudanca',
+            arguments: { ...argumentos, evidencias: [] } });
+        expect(semEvidencias.isError).toBe(true);
+        expect(JSON.stringify(semEvidencias)).toContain('evidências');
+        const outroTipo = await cliente.callTool({ name: 'propor_mudanca',
+            arguments: { ...argumentos, tipo: 'demissao' } });
+        expect(outroTipo.isError).toBe(true);
+        expect(JSON.stringify(outroTipo)).toContain('Informe o ID');
+        expect(instancia.publico().social.propostas).toEqual([]);
+        const pedido = await cliente.callTool({ name: 'propor_mudanca', arguments: argumentos });
+        expect(pedido.isError).toBe(false);
+        const proposta = instancia.publico().social.propostas.at(-1)!;
+        expect(proposta).toMatchObject({ tipo: 'promocao', autorId: id, alvoId: id,
+            cargo: 'refinador', estado: 'pendente', evidencias: [fonte.id] });
+        expect(instancia.publico().funcionarios.find((pessoa) => pessoa.id === id)?.cargo).toBe('estagiario');
+        expect(instancia.decidirProposta(proposta.id, true).ok).toBe(true);
+        expect(instancia.publico().funcionarios.find((pessoa) => pessoa.id === id)?.cargo).toBe('refinador');
+        expect(instancia.publico().social.propostas.at(-1)?.estado).toBe('aprovada');
+        expect(instancia.publico().carreira[id]?.merito).toBe(11.7);
+    } finally {
+        await cliente.close();
+        instancia.encerrar();
+    }
+});
+
+test('promoção sem alvo explícito respeita mérito, vagas e objetivo escolhido pelo MCP', async () => {
+    const instancia = escritorio(await mkdtemp(join(tmpdir(), 'lumon-carreira-')));
+    const cliente = new Client({ name: 'teste-carreira', version: '1' });
+    const id = pedro.id;
+    try {
+        const fonte = instancia['social'].registrar({ tipo: 'elogiar', autorId: helena.id, alvoId: id,
+            texto: 'Seu resultado foi bom.', alcance: 'publico', ouvintes: [], fontes: [] }, false);
+        instancia['estado'].carreira[id] = { merito: 0 };
+        await cliente.connect(new StreamableHTTPClientTransport(
+            new URL(await instancia['mcp'].urlDe(id, 'geral'))));
+        const pedir = () => cliente.callTool({ name: 'propor_mudanca', arguments: {
+            tipo: 'promocao', motivo: 'Quero crescer na carreira.', evidencias: [fonte.id],
+        } });
+        expect(JSON.stringify(await pedir())).toContain('Faltam 45');
+        instancia['estado'].carreira[id] = { merito: 45 };
+        expect(JSON.stringify(await pedir())).toContain('Não há vaga');
+        expect((await cliente.callTool({ name: 'escolher_carreira',
+            arguments: { cargo: 'conselheiro' } })).isError).toBe(false);
+        expect((await pedir()).isError).toBe(false);
+        const proposta = instancia.publico().social.propostas.at(-1)!;
+        expect(proposta).toMatchObject({ autorId: id, alvoId: id, cargo: 'conselheiro', estado: 'pendente' });
+        expect(instancia.decidirProposta(proposta.id, true).ok).toBe(true);
+        expect(instancia.publico().funcionarios.find((pessoa) => pessoa.id === id)?.cargo).toBe('conselheiro');
+    } finally {
+        await cliente.close();
         instancia.encerrar();
     }
 });
@@ -561,7 +639,7 @@ test('reação social espera o trabalho e respeita o limite de falas seguidas', 
     } finally { canal.encerrar(); }
 });
 
-test('líder escreve por iniciativa no chat individual, com intervalo contra insistência', async () => {
+test('contato com a Diretoria foi removido do catálogo e não aceita chamadas antigas', async () => {
     const instancia = escritorio();
     const cliente = new Client({ name: 'teste-iniciativa', version: '1' });
     try {
@@ -569,13 +647,10 @@ test('líder escreve por iniciativa no chat individual, com intervalo contra ins
         await cliente.connect(new StreamableHTTPClientTransport(new URL(url)));
         const chamar = () => cliente.callTool({ name: 'falar_com_responsavel',
             arguments: { mensagem: 'Preciso de ajuda.' } });
-        expect((await chamar()).isError).toBe(false);
-        expect(instancia.conversa(helena.id).at(-1))
-            .toMatchObject({ autor: 'funcionario', texto: 'Preciso de ajuda.' });
+        expect((await cliente.listTools()).tools.map((item) => item.name))
+            .not.toContain('falar_com_responsavel');
         expect((await chamar()).isError).toBe(true);
-        expect(instancia.conversa(helena.id)).toHaveLength(1);
-        expect(instancia.publico().naoLidas[helena.id]).toBe(1);
-        instancia.marcarConversaLida(helena.id);
+        expect(instancia.conversa(helena.id)).toEqual([]);
         expect(instancia.publico().naoLidas[helena.id]).toBeUndefined();
     } finally {
         await cliente.close();
@@ -617,15 +692,27 @@ test('MCP distingue reação inválida e publica os valores atualizados na ficha
         instancia['social'].ajustarRelacao(pedro.id, helena.id, fonte.id, { ressentimento: 100 });
         const url = await instancia['mcp'].urlDe(pedro.id, 'chat');
         await cliente.connect(new StreamableHTTPClientTransport(new URL(url)));
-        const reagir = (acontecimento: string) => cliente.callTool({ name: 'reagir_ao_acontecimento', arguments: {
-            acontecimento, reacao: 'concordar', motivo: 'Ela tem razão neste ponto.', funcionario: helena.id,
+        const nomes = (await cliente.listTools()).tools.map((item) => item.name);
+        expect(nomes).toContain('atualizar_pensamento');
+        expect(nomes).not.toContain('reagir_ao_acontecimento');
+        expect((await cliente.callTool({ name: 'reagir_ao_acontecimento', arguments: {
+            acontecimento: fonte.id, reacao: 'concordar', motivo: 'Ela tem razão.',
+        } })).isError).toBe(true);
+        const reagir = (acontecimento: string) => cliente.callTool({ name: 'atualizar_pensamento', arguments: {
+            acontecimento, reacao: 'concordar', pensamento: 'Ela tem razão neste ponto.', funcionario: helena.id,
         } });
         const invalida = await reagir('inexistente');
         expect(invalida.isError).toBe(true);
         expect(invalida.structuredContent).toMatchObject({ codigo: 'reacao_invalida', terminal: false });
+        expect(instancia.publico().pensamentos[pedro.id]).toBeUndefined();
         const aplicada = await reagir(fonte.id);
         expect(aplicada.isError).toBe(false);
         expect(aplicada.structuredContent).toMatchObject({ codigo: 'reacao_aplicada', terminal: false });
+        expect(instancia.publico().pensamentos[pedro.id]?.texto).toBe('Ela tem razão neste ponto.');
+        const reacao = instancia.publico().social.eventos.find((item) => item.tipo === 'reacao')!;
+        expect(reacao).toMatchObject({ alcance: 'reservado', ouvintes: [pedro.id], fontes: [fonte.id] });
+        expect(instancia['contextoGeral'](helena.id)).not.toContain('Ela tem razão neste ponto.');
+        expect(instancia.mensagensGeral()).toEqual([]);
         const relacao = instancia.publico().social.relacoes.find((item) => item.autorId === pedro.id
             && item.colegaId === helena.id)!;
         expect(relacao.ressentimento).toBeLessThan(100);
@@ -634,6 +721,62 @@ test('MCP distingue reação inválida e publica os valores atualizados na ficha
         expect(repetida.structuredContent).toMatchObject({ codigo: 'reacao_ja_aplicada', terminal: false });
         expect(instancia.publico().social.relacoes.find((item) => item.autorId === pedro.id
             && item.colegaId === helena.id)?.ressentimento).toBe(relacao.ressentimento);
+    } finally { await cliente.close(); instancia.encerrar(); }
+});
+
+test('pensamento sem reação não altera relações e entradas incompletas não aplicam efeitos', async () => {
+    const instancia = escritorio();
+    const cliente = new Client({ name: 'teste-pensamento', version: '1' });
+    try {
+        const url = await instancia['mcp'].urlDe(pedro.id, 'chat');
+        await cliente.connect(new StreamableHTTPClientTransport(new URL(url)));
+        const antes = structuredClone(instancia.publico().social);
+        const salvo = await cliente.callTool({ name: 'atualizar_pensamento',
+            arguments: { pensamento: 'Preciso descansar.' } });
+        expect(salvo.isError).toBe(false);
+        expect(instancia.publico().social).toEqual(antes);
+        const pensamento = structuredClone(instancia.publico().pensamentos[pedro.id]);
+        for (const entrada of [
+            { reacao: 'concordar' },
+            { acontecimento: 'fonte' },
+            { funcionario: helena.id },
+            { reacao: 'invalida', funcionario: helena.id },
+            { reacao: 'concordar', funcionario: helena.id, pensamento: '' },
+            { reacao: 'concordar', funcionario: 'Pessoa inexistente' },
+        ]) {
+            const resposta = await cliente.callTool({ name: 'atualizar_pensamento',
+                arguments: { pensamento: 'Não deve salvar.', ...entrada } });
+            expect(resposta.isError).toBe(true);
+            expect(instancia.publico().pensamentos[pedro.id]).toEqual(pensamento);
+            expect(instancia.publico().social).toEqual(antes);
+        }
+    } finally { await cliente.close(); instancia.encerrar(); }
+});
+
+test('pensamento interpreta o acontecimento recente pelo nome e recusa nomes ambíguos', async () => {
+    const instancia = escritorio();
+    const cliente = new Client({ name: 'teste-pensamento-recente', version: '1' });
+    try {
+        const fonte = instancia['social'].registrar({ tipo: 'fala', autorId: helena.id,
+            texto: 'Você pode descansar.', alcance: 'publico', ouvintes: [], fontes: [] }, false);
+        const url = await instancia['mcp'].urlDe(pedro.id, 'chat');
+        await cliente.connect(new StreamableHTTPClientTransport(new URL(url)));
+        const pensamento = 'Concordo com ela e posso cuidar melhor de mim.';
+        const resposta = await cliente.callTool({ name: 'atualizar_pensamento',
+            arguments: { pensamento, reacao: 'concordar', funcionario: helena.nome } });
+        expect(resposta.isError).toBe(false);
+        expect(resposta.structuredContent).toMatchObject({ codigo: 'reacao_aplicada', efeito: 'privado' });
+        expect(instancia.publico().pensamentos[pedro.id]?.texto).toBe(pensamento);
+        expect(instancia.publico().social.eventos.at(-1)).toMatchObject({
+            tipo: 'reacao', autorId: pedro.id, alvoId: helena.id, fontes: [fonte.id], ouvintes: [pedro.id],
+        });
+        const anterior = structuredClone(instancia.publico());
+        instancia['estado'].funcionarios.find((pessoa) => pessoa.id === lia.id)!.nome = helena.nome;
+        const ambigua = await cliente.callTool({ name: 'atualizar_pensamento',
+            arguments: { pensamento: 'Qual delas?', reacao: 'discordar', funcionario: helena.nome } });
+        expect(ambigua.isError).toBe(true);
+        expect(instancia.publico().pensamentos).toEqual(anterior.pensamentos);
+        expect(instancia.publico().social.relacoes).toEqual(anterior.social.relacoes);
     } finally { await cliente.close(); instancia.encerrar(); }
 });
 
@@ -725,7 +868,7 @@ test('chat individual caminha pelo MCP antes de entregar o convite privado no as
     const projeto = { id: 'atual', nome: 'Projeto atual', pasta: 'C:/temporario' };
     instancia['estado'].projetos = [projeto];
     const texto = 'Lia, podemos conversar em particular sobre os testes que faltaram?';
-    let resultado: unknown;
+    let resultado: Awaited<ReturnType<Client['callTool']>> | undefined;
     let promptRecebido = '';
     instancia['estado'].pensamentos[helena.id] = {
         texto: 'Finalize a auditoria do projeto antigo.', atualizadoEm: new Date().toISOString(),
@@ -760,7 +903,9 @@ test('chat individual caminha pelo MCP antes de entregar o convite privado no as
         expect(podeConhecer(relato, lia.id)).toBe(false);
         for (let indice = 0; indice < 180; indice++) instancia['simulacao'].avancar(0.1);
         await terminou.promise;
-        expect(JSON.stringify(resultado)).toContain('Ação registrada');
+        if (!resultado) throw new Error('A chamada MCP não entregou o resultado.');
+        expect(resultado.isError).not.toBe(true);
+        expect(resultado.structuredContent).toMatchObject({ codigo: 'interacao_aplicada' });
         const convite = instancia.publico().social.eventos.find((item) => item.texto === texto)!;
         expect(convite.ouvintes).toEqual([helena.id, lia.id]);
         expect(podeConhecer(convite, pedro.id)).toBe(false);
@@ -883,26 +1028,31 @@ test('MCP identifica a autoria social e não expõe ações do jogador aos agent
         expect(nomes).not.toContain('decidirProposta');
         expect(nomes).not.toContain('pedir_refazer');
         const argumentos = {
-            funcionario: helena.id, acao: 'cobrar', mensagem: 'Revise a entrega.',
+            funcionario: helena.id, mensagem: 'Revise a entrega.',
             alcance: 'publico', fontes: [pedro.id],
         };
-        const sobreInvalido = await cliente.callTool({ name: 'interagir_socialmente',
+        const sobreInvalido = await cliente.callTool({ name: 'cobrar',
             arguments: { ...argumentos, sobre: 'Revisão do trabalho antigo' } });
         expect(sobreInvalido.isError).toBe(true);
         expect(JSON.stringify(sobreInvalido)).toContain('Omita esse campo');
-        const fonteInvalida = await cliente.callTool({ name: 'interagir_socialmente', arguments: argumentos });
+        const fonteInvalida = await cliente.callTool({ name: 'cobrar', arguments: argumentos });
         expect(fonteInvalida.isError).toBe(true);
         expect(JSON.stringify(fonteInvalida)).toContain('nunca IDs de funcionários');
-        const nomeInvalido = await cliente.callTool({ name: 'interagir_socialmente',
+        const nomeInvalido = await cliente.callTool({ name: 'cobrar',
             arguments: { ...argumentos, funcionario: 'Ninguém' } });
         expect(nomeInvalido.isError).toBe(true);
         expect(JSON.stringify(nomeInvalido)).toContain('nome completo ou o ID');
         expect(instancia.publico().social.eventos.some((item) => item.tipo === 'cobrar')).toBe(false);
         const fonte = instancia['social'].registrar({ tipo: 'fala', autorId: helena.id, texto: 'Vamos melhorar.',
             alcance: 'publico', ouvintes: [], fontes: [] }, false);
-        await cliente.callTool({ name: 'interagir_socialmente', arguments: {
-            funcionario: helena.id, acao: 'contestar', mensagem: 'Discordo da abordagem.',
+        const autoriaInjetada = await cliente.callTool({ name: 'contestar', arguments: {
+            funcionario: helena.id, mensagem: 'Discordo da abordagem.',
             alcance: 'publico', fontes: [fonte.id], autorId: lia.id,
+        } });
+        expect(autoriaInjetada.isError).toBe(true);
+        await cliente.callTool({ name: 'contestar', arguments: {
+            funcionario: helena.id, mensagem: 'Discordo da abordagem.',
+            alcance: 'publico', fontes: [fonte.id],
         } });
         expect(instancia.publico().social.eventos.find((item) => item.tipo === 'contestar')?.autorId).toBe(pedro.id);
         const contestacao = instancia.publico().social.eventos.find((item) => item.tipo === 'contestar')!;
@@ -932,7 +1082,7 @@ test('líder no Geral executa repreensão pública no turno de reação com font
     const mensagem = 'Pedro, respeite a preferência de tratamento do responsável.';
     let instrucoes = '';
     let contexto = '';
-    let resultado: unknown;
+    let resultado: Awaited<ReturnType<Client['callTool']>> | undefined;
     let executou = false;
     let turnosLider = 0;
     instancia['geral']['abrirSessao'] = (pessoa, configuracao) => ({
@@ -942,20 +1092,22 @@ test('líder no Geral executa repreensão pública no turno de reação com font
             executou = true;
             try {
                 expect(opcoes?.exigirFerramenta).toBe(true);
-                expect(opcoes?.ferramentas).toContain('interagir_socialmente');
+                expect(opcoes?.ferramentas).toContain('cobrar');
                 instrucoes = configuracao.instrucoes;
                 contexto = prompt;
                 await cliente.connect(new StreamableHTTPClientTransport(new URL(configuracao.mcpUrl!)));
                 const nomes = (await cliente.listTools()).tools.map((item) => item.name);
                 expect(nomes).toEqual(expect.arrayContaining([
-                    'interagir_socialmente', 'conversar_reservado', 'reagir_ao_acontecimento',
-                    'consultar_acontecimento', 'propor_mudanca', 'apoiar_proposta',
+                    'cobrar', 'conversar_reservado', 'atualizar_pensamento',
+                    'consultar', 'propor_mudanca',
                 ]));
-                resultado = await cliente.callTool({ name: 'interagir_socialmente', arguments: {
-                    funcionario: pedro.id, acao: 'cobrar', mensagem, alcance: 'publico', fontes: [fonte.id],
+                expect(nomes).not.toContain('consultar_acontecimento');
+                expect(nomes).not.toContain('apoiar_proposta');
+                resultado = await cliente.callTool({ name: 'cobrar', arguments: {
+                    funcionario: pedro.id, mensagem, alcance: 'publico', fontes: [fonte.id],
                 } });
-                const repetida = await cliente.callTool({ name: 'interagir_socialmente', arguments: {
-                    funcionario: pedro.id, acao: 'cobrar', mensagem, alcance: 'publico', fontes: [fonte.id],
+                const repetida = await cliente.callTool({ name: 'cobrar', arguments: {
+                    funcionario: pedro.id, mensagem, alcance: 'publico', fontes: [fonte.id],
                 } });
                 expect(repetida.isError).toBe(true);
                 expect(JSON.stringify(repetida)).toContain('encerrou a participação');
@@ -973,7 +1125,7 @@ test('líder no Geral executa repreensão pública no turno de reação com font
         await estabilizar();
         expect(turnosLider).toBe(1);
         expect(instancia.publico().social.eventos.filter((item) => item.tipo === 'cobrar')).toHaveLength(1);
-        expect(instrucoes).toContain('cobrar alguém, use interagir_socialmente');
+        expect(instrucoes).toContain('use cobrar, contestar, elogiar, desculpar, defender ou fofocar');
         expect(instrucoes).not.toContain('suas outras ferramentas são privados');
         expect(contexto).toStartWith('Turno de');
         expect(contexto).toContain(fonte.id);
@@ -1013,10 +1165,10 @@ test('refinador pode contestar publicamente na reação e o colega recebe o acon
             reagiu = true;
             try {
                 expect(opcoes?.exigirFerramenta).toBe(true);
-                expect(opcoes?.ferramentas).toContain('interagir_socialmente');
+                expect(opcoes?.ferramentas).toContain('cobrar');
                 await cliente.connect(new StreamableHTTPClientTransport(new URL(configuracao.mcpUrl!)));
-                const retorno = await cliente.callTool({ name: 'interagir_socialmente', arguments: {
-                    funcionario: helena.id, acao: 'contestar', alcance: 'publico', fontes: [fonte.id],
+                const retorno = await cliente.callTool({ name: 'contestar', arguments: {
+                    funcionario: helena.id, alcance: 'publico', fontes: [fonte.id],
                     mensagem: 'Helena, não concordo com essa generalização.',
                 } });
                 expect(retorno.isError).toBe(false);

@@ -27,7 +27,8 @@ export const esquemaGrupoRefinamento = z.object({
     refinadoPor: z.string().optional(),
 });
 
-export const esquemaArquivoRefinamento = z.object({
+const esquemaArquivoAtual = z.object({
+    versaoCoordenadas: z.literal(2).optional(),
     id: z.string(),
     nome: z.string(),
     grade: z.array(z.array(z.number().int().min(0).max(9))),
@@ -45,7 +46,24 @@ export const esquemaArquivoRefinamento = z.object({
     })).default([]),
 });
 
-export type ArquivoRefinamento = z.infer<typeof esquemaArquivoRefinamento>;
+/** Use ao carregar arquivos antigos para preservar as posições da grade no padrão atual. */
+export const esquemaArquivoRefinamento = z.preprocess((entrada) => {
+    if (!entrada || typeof entrada !== 'object' || !('grade' in entrada)) return entrada;
+    const arquivo = entrada as Record<string, unknown>;
+    if (arquivo.versaoCoordenadas === 2) return entrada;
+    const converter = (celula: string) => {
+        const posicao = celula.match(/^([A-H])(10|[1-9])$/);
+        return posicao ? letrasColuna[Number(posicao[2]) - 1]! + (posicao[1]!.charCodeAt(0) - 64) : celula;
+    };
+    const converterRegistros = (registros: unknown) => Array.isArray(registros)
+        ? registros.map((registro) => ({ ...registro,
+            celulas: Array.isArray(registro.celulas) ? registro.celulas.map(converter) : registro.celulas }))
+        : registros;
+    return { ...arquivo, versaoCoordenadas: 2, grupos: converterRegistros(arquivo.grupos),
+        envios: converterRegistros(arquivo.envios) };
+}, esquemaArquivoAtual);
+
+export type ArquivoRefinamento = z.infer<typeof esquemaArquivoAtual>;
 
 export type ResultadoRefinamento = 'aceito' | 'temperamento_incorreto' | 'rejeitado';
 
@@ -118,9 +136,9 @@ export function gerarArquivo(semente: number, prazo: Date): ArquivoRefinamento {
         }
     }
     return {
-        id: `arquivo_${semente.toString(36)}`,
+        versaoCoordenadas: 2, id: `arquivo_${semente.toString(36)}`,
         nome: cidades[Math.floor(sortear() * cidades.length)]!,
-        grade, grupos, tentativas: {}, envios: [], prazo: prazo.toISOString(), duracaoMinutos: 5, rodadas: [],
+        grade, grupos, tentativas: {}, envios: [], prazo: prazo.toISOString(), duracaoMinutos: 10, rodadas: [],
     };
 }
 
@@ -239,8 +257,8 @@ export function descreverEnvios(arquivo: ArquivoRefinamento): string {
 }
 
 /**
- * Confere um envio do agente. É aceito quando cobre um grupo ainda não refinado com no máximo uma célula a
- * mais e o temperamento certo. Função pura: devolve o arquivo atualizado e o resultado.
+ * Use para conferir exatamente três células de um grupo ainda não refinado e a caixa escolhida.
+ * Função pura: devolve o arquivo atualizado e o resultado.
  */
 export function refinar(
     arquivo: ArquivoRefinamento, funcionarioId: string, celulas: string[], temperamento: Temperamento,

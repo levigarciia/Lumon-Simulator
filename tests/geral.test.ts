@@ -3,7 +3,8 @@ import { CanalGeral } from '../electron/services/geral';
 import type { SessaoAgente } from '../electron/services/harness/tipos';
 import type { Funcionario } from '../shared/funcionarios';
 import {
-    contarFalasDoEmbate, ehSilencio, encontrarInterpelados, esquemaMensagemGeral, removerAutoVocativo, removerFrasesRepetidas, repeteFala,
+    anunciaAcao, contarFalasDoEmbate, ehSilencio, encontrarInterpelados, esquemaMensagemGeral,
+    removerAutoVocativo, removerFrasesRepetidas, repeteFala,
     type MensagemGeral,
 } from '../shared/geral';
 
@@ -64,6 +65,137 @@ function preparar(enviar: SessaoAgente['enviar'], iniciais: MensagemGeral[] = []
 async function estabilizar() {
     for (let passo = 0; passo < 40; passo++) await Promise.resolve();
 }
+
+test('promessa sem execução não é publicada por nenhum provedor do Geral', async () => {
+    let tentativas = 0;
+    const caso = preparar(async (_prompt, ouvinte) => {
+        tentativas++;
+        ouvinte.texto('Vou revisar o trabalho agora.');
+        expect(caso.canal.situacao().falasEmAndamento).toEqual([]);
+    });
+    try {
+        caso.canal.enviarDoUsuario('Confira a entrega.');
+        await estabilizar();
+        expect(caso.falas).toEqual([]);
+        expect(tentativas).toBe(3);
+        expect(caso.mensagens().some((item) => item.texto === 'Vou revisar o trabalho agora.')).toBe(false);
+    } finally { caso.canal.encerrar(); }
+});
+
+test('Geral preserva fala e ação confirmada mesmo após encerrar a participação', async () => {
+    const texto = 'Vou entrar no Work para continuar o refinamento.';
+    const caso = preparar(async (_prompt, ouvinte) => {
+        ouvinte.texto(texto);
+        ouvinte.iniciarFerramenta('entrada', 'Escritório: ir_para_work', '{}');
+        caso.canal.registrarAcao(claudio.id, true);
+        ouvinte.concluirFerramenta('entrada', false, 'Entrada agendada.');
+    });
+    try {
+        caso.canal.enviarDoUsuario('@claudio escolha o que quer fazer.');
+        await estabilizar();
+        expect(caso.falas).toEqual([`claudio: ${texto}`]);
+        expect(caso.mensagens().find((item) => item.tipo === 'acao')?.ferramentas[0])
+            .toMatchObject({ id: 'entrada', estado: 'concluida' });
+    } finally { caso.canal.encerrar(); }
+});
+
+test('Geral pede chamada real quando o provedor escreve nome e argumentos na fala', async () => {
+    let tentativas = 0;
+    const caso = preparar(async (_prompt, ouvinte) => {
+        if (++tentativas === 1) {
+            ouvinte.texto('Entrarei no Work para continuar.\n\nir_para_work\n{"arquivo":"Tumwater"}');
+            expect(caso.canal.situacao().falasEmAndamento).toEqual([]);
+            return;
+        }
+        ouvinte.iniciarFerramenta('entrada', 'Escritório: ir_para_work', '{}');
+        caso.canal.registrarAcao(claudio.id, true);
+        ouvinte.concluirFerramenta('entrada', false, 'Entrada agendada.');
+        ouvinte.texto('Entrarei no Work para continuar.');
+    });
+    try {
+        caso.canal.enviarDoUsuario('@claudio escolha o que quer fazer.');
+        await estabilizar();
+        expect(tentativas).toBe(2);
+        expect(caso.falas).toEqual(['claudio: Entrarei no Work para continuar.']);
+        expect(caso.mensagens().filter((item) => item.tipo === 'acao')).toHaveLength(1);
+    } finally { caso.canal.encerrar(); }
+});
+
+test('fala confirmada com a pausa é preservada sem publicar comentários posteriores do provedor', async () => {
+    const caso = preparar(async (_prompt, ouvinte) => {
+        ouvinte.iniciarFerramenta('pausa', 'Escritório: fazer_pausa', '{"atividade":"descansando","minutos":1}');
+        caso.canal.pausaIniciada(claudio.id);
+        ouvinte.concluirFerramenta('pausa', false, 'Pausa iniciada.');
+        ouvinte.confirmarTexto?.('Vou descansar.');
+        ouvinte.texto('Vou descansar. Já voltei descansado.');
+    });
+    try {
+        caso.canal.enviarDoUsuario('@claudio escolha o que quer fazer.');
+        await estabilizar();
+        expect(caso.falas).toEqual(['claudio: Vou descansar.']);
+        expect(caso.mensagens().find((item) => item.tipo === 'acao')?.ferramentas[0]?.estado).toBe('concluida');
+    } finally { caso.canal.encerrar(); }
+});
+
+test('negação de uma ação não é confundida com promessa de execução', () => {
+    expect(anunciaAcao('Não vou revisar o trabalho.')).toBe(false);
+    expect(anunciaAcao('Não vou assumir culpa. Vou revisar o trabalho.')).toBe(true);
+    expect(anunciaAcao('Vou ver o que houve.')).toBe(true);
+    expect(anunciaAcao('Vou investigar o ocorrido.')).toBe(true);
+    expect(anunciaAcao('Vou entrar no Work para começar o refinamento.')).toBe(true);
+    expect(anunciaAcao('Vou ir para o Work.')).toBe(true);
+    expect(anunciaAcao('Vou refinar o arquivo.')).toBe(true);
+    expect(anunciaAcao('Não vou entrar no Work.')).toBe(false);
+});
+
+test('promessa mantém o agente no turno até executar antes de passar ao colega', async () => {
+    const gepeto = { ...claudio, id: 'gepeto', nome: 'Gepeto' };
+    let mensagens: MensagemGeral[] = [];
+    const ordem: string[] = [];
+    const canal = new CanalGeral({
+        funcionarios: () => [claudio, gepeto], mensagens: () => mensagens,
+        gravar: (novas) => { mensagens = novas; }, contexto: () => '',
+        urlMcp: async () => 'http://localhost', pasta: '.',
+        emitirMensagens: () => {}, emitirEstado: () => {},
+    }, (pessoa) => ({
+        enviar: async (prompt, ouvinte) => {
+            ordem.push(pessoa.id);
+            if (ordem.length === 1) {
+                ouvinte.texto('Vou entrar no Work para começar o refinamento.');
+                return;
+            }
+            if (pessoa.id === claudio.id) {
+                expect(prompt).toContain('Você continua no mesmo turno');
+                ordem.push('ir_para_work');
+                canal.registrarAcao(pessoa.id, true);
+                return;
+            }
+            ouvinte.texto('Recebido.');
+        },
+        encerrar: () => {},
+    }));
+    try {
+        canal.enviarDoUsuario('O arquivo está disponível.');
+        await estabilizar();
+        expect(ordem).toEqual(['claudio', 'claudio', 'ir_para_work', 'gepeto']);
+        expect(mensagens.some((item) => item.texto.includes('Vou entrar'))).toBe(false);
+    } finally { canal.encerrar(); }
+});
+
+test('fala por ferramenta recusa promessa sem impedir a execução no mesmo turno', async () => {
+    const caso = preparar(async () => {
+        const resultado = caso.canal.falarDoAgenteResultado(claudio.id, 'Vou entrar no Work.');
+        expect(resultado.erro).toBe(true);
+        expect(caso.falas).toEqual([]);
+        caso.canal.registrarAcao(claudio.id, true);
+    });
+    try {
+        caso.canal.enviarDoUsuario('O arquivo está disponível.');
+        await estabilizar();
+        expect(caso.falas).toEqual([]);
+        expect(caso.mensagens().some((item) => item.autorId === 'sistema')).toBe(false);
+    } finally { caso.canal.encerrar(); }
+});
 
 test('nova pausa da mesma dupla abre outra sessão sem reaproveitar a situação física anterior', async () => {
     let chave = 'primeira-pausa';
@@ -612,7 +744,7 @@ test('citado passa pelo turno de reação com ferramenta obrigatória antes de r
                     ouvinte.texto('Minha reação privada.');
                     expect(canal.situacao().falasEmAndamento).toEqual([]);
                     expect(prompt).toStartWith('Turno de');
-                    expect(opcoes?.ferramentas?.includes('interagir_socialmente')).toBe(true);
+                    expect(opcoes?.ferramentas?.includes('cobrar')).toBe(true);
                     expect(() => canal.falarDoAgente(pessoa.id, 'Vou publicar')).toThrow('turno de reação');
                     if (pessoa.id === colega.id) expect(prompt).toContain('(fonte evt_claudio)');
                     const citadoPeloJogador = pessoa.id === claudio.id;
@@ -631,7 +763,7 @@ test('citado passa pelo turno de reação com ferramenta obrigatória antes de r
         expect(turnos).toEqual(['claudio:reflexao', 'claudio:fala', 'gepeto:reflexao', 'gepeto:fala']);
         expect(mensagens.filter((mensagem) => mensagem.autorId !== 'usuario').map((item) => item.texto))
             .toEqual(['@Gepeto, faça a tarefa.', 'Certo.']);
-        expect(instrucoesLider).toContain('acao cobrar');
+        expect(instrucoesLider).toContain('cobrar (alcance publico, fontes)');
         expect(instrucoesLider).toContain('tipo demissao');
     } finally { canal.encerrar(); }
 });
@@ -665,7 +797,7 @@ test('discussão em ciclo leva o citado a agir em vez de rebater outra vez', asy
         await estabilizar();
         expect(turnos.map((turno) => `${turno.pessoa}:${turno.reacao}`)).toEqual(['gepeto:true']);
         expect(turnos[0]!.prompt).toContain('6 falas seguidas');
-        expect(turnos[0]!.ferramentas).toContain('interagir_socialmente');
+        expect(turnos[0]!.ferramentas).toContain('cobrar');
         expect(turnos[0]!.ferramentas).not.toContain('nenhuma_acao');
     } finally { canal.encerrar(); }
 });

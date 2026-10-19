@@ -1,3 +1,4 @@
+import { concluirAcao, recusarAcao, type ResultadoAcao } from './ferramentas/resultado';
 import { randomUUID } from 'node:crypto';
 import {
     nomeCargo, refina, type Funcionario, type Mensagem, type Projeto, type StatusFuncionario,
@@ -30,6 +31,10 @@ type RegistroOrquestracao = {
     rejeitar?: (trabalhoId: string, motivo: string) => Resultado;
     prepararCorrecao?: (arquivoId: string, motivo: string) => Resultado;
     adequacao?: (liderId: string, funcionarioId: string) => number;
+    resumirRefinamento?: (trabalho: RegistroTrabalho) => string;
+    duracaoRefinamento?: (arquivoId: string) => number;
+    refinamentoCompleto?: (arquivoId: string) => boolean;
+    aoLiberar?: (funcionarioId: string, arquivoId?: string) => void;
 };
 
 type PedidoAtivo = {
@@ -42,11 +47,12 @@ type PedidoAtivo = {
     funcionarios: Set<string>;
     pendentes: Set<Promise<RespostaTrabalho>>;
     interrompidos: Set<string>;
+    pausados: Set<string>;
     origemCorrecaoId?: string;
     arquivoId?: string;
 };
 
-/** Limites de execução no Work; após o prazo e a tolerância, o agente é dado como interrompido. */
+/** Limites técnicos de execução e tolerância para liberar sessões após o fim do período. */
 export type PrazosOrquestracao = { liderMs: number; delegadoMs: number; toleranciaMs: number };
 
 const prazosPadrao: PrazosOrquestracao = { liderMs: 1200000, delegadoMs: 180000, toleranciaMs: 15000 };
@@ -63,15 +69,21 @@ async function aguardarAte<T>(promessa: Promise<T>, ms: number): Promise<T | und
 
 const instrucoesLiderRefinamento = [
     'Pedido da aba Work: refinamento de macrodados. Você coordena o arquivo.',
-    'Primeiro abra o arquivo para conhecer os dados. Depois delegue uma etapa a um colega disponível.',
+    'Primeiro abra o arquivo para conhecer os dados e os participantes atuais.',
+    'Para trabalhar em conjunto, use invocar_pro_work: os colegas livres iniciam períodos independentes no mesmo arquivo.',
+    'Você pode refinar enquanto eles trabalham. Não aguarde nem delegue a quem já está no Work.',
+    'Use delegar somente quando quiser atribuir uma etapa específica a um colega livre e aguardar o resultado.',
     'Não invente coordenadas nem uma caixa obrigatória antes de examinar os dados e os envios reais.',
-    'Delegue o envio real de um grupo por refinar, sem impor uma região ou um temperamento não confirmado.',
+    'Delegue o envio real de um grupo por refinar, com as três células '
+        + 'verificadas na grade e sem impor caixa desconhecida.',
     'Cada colega faz uma etapa curta: um grupo aceito ou no máximo quatro envios, e devolve o resultado.',
     'Depois de cada retorno, delegue ao próximo colega disponível que ainda não participou deste arquivo.',
     'Não repita colegas enquanto houver alguém disponível que ainda não participou. Depois de todos participarem, '
         + 'ou se todos os que ainda não participaram estiverem indisponíveis, refine você; não delegue de novo.',
     'Considere o bem estar, a confiança e os envios anteriores ao escolher entre colegas ainda não participantes.',
-    'Trabalhe até concluir o arquivo ou o prazo terminar. Depois resuma: só a Diretoria aprova.',
+    'O contador delimita seu período de trabalho, não a conclusão do arquivo. Só a Diretoria aprova.',
+    'Você pode sair_do_work para discutir no Geral ou ficar livre, ou fazer_pausa para descansar num móvel.',
+    'Os colegas continuam suas etapas mesmo se você sair. Você decide quando voltar por ir_para_work no Geral.',
     'Priorize chamadas de ferramentas; não narre hipóteses a cada envio. Resuma a entrega em até três frases.',
 ];
 
@@ -82,10 +94,11 @@ const instrucoesDelegadoRefinamento = 'Use abrir_arquivo para ver a grade e refi
     + 'Somente retornos das ferramentas comprovam tentativas, aceitações ou rejeições. '
     + 'Sua etapa termina ao aceitar um grupo, após quatro envios ou ao terminar o prazo, o que vier primeiro. '
     + 'Leia a grade e os envios recentes antes de escolher; nunca use células marcadas * nem repita uma seleção já '
-    + 'rejeitada. Priorize seleções reconhecidas ainda não aceitas nos envios da equipe e teste só caixas não tentadas. '
+    + 'rejeitada. Priorize seleções reconhecidas ainda não aceitas nos '
+        + 'envios da equipe e teste só caixas não tentadas. '
     + 'Região ou caixa sugeridas não são resultados verificados. Abandone uma região sem padrões reconhecidos. '
     + 'Não narre hipóteses a cada envio. '
-    + 'Durante a etapa só as ferramentas do Work funcionam: não fale no Geral nem converse em particular. '
+    + 'Pode sair_do_work para conversar no Geral ou fazer_pausa para descansar antes de terminar a etapa. '
     + 'Se a região pedida não tiver três dígitos iguais, escolha outra na grade em vez de reclamar ao líder. '
     + 'Ao terminar, devolva as células, resultados e pendências em até três frases. Outros colegas continuarão.';
 
@@ -97,35 +110,61 @@ export class Orquestracao {
 
     enviar(
         projetoId: string, tarefa: string, threadId = threadPrincipal, origemCorrecaoId?: string, arquivoId?: string,
+        funcionarioId?: string,
     ): Resultado {
-        const chave = `${projetoId}:${threadId}`;
+        const chave = `${projetoId}:${threadId}${funcionarioId ? `:${funcionarioId}` : ''}`;
         if (this.ativos.has(chave)) return { ok: false, erro: 'Aguarde ou interrompa o pedido atual do Work.' };
         const projeto = this.registro.projetos().find((item) => item.id === projetoId);
         if (!projeto) return { ok: false, erro: 'Escolha o projeto em que a equipe vai trabalhar.' };
-        const lideres = this.registro.funcionarios().filter((pessoa) => pessoa.cargo === 'lider');
-        if (!lideres.length) return { ok: false, erro: 'Defina um líder na equipe para distribuir os pedidos.' };
+        const lideres = this.registro.funcionarios().filter((pessoa) => funcionarioId
+            ? pessoa.id === funcionarioId && !!arquivoId && refina(pessoa.cargo) : pessoa.cargo === 'lider');
+        if (!lideres.length) return { ok: false, erro: funcionarioId
+            ? 'Esse funcionário não pode refinar Macrodados.' : 'Defina um líder na equipe para distribuir os pedidos.' };
         const lider = lideres.filter((pessoa) => !this.ocupado(pessoa.id)
             && !this.registro.impedimento?.(pessoa.id)).sort((a, b) =>
             this.registro.trabalhos().filter((item) => item.funcionarioId === a.id && !item.solicitante?.id).length
             - this.registro.trabalhos().filter((item) => item.funcionarioId === b.id && !item.solicitante?.id).length)[0];
         if (!lider) {
-            return { ok: false, erro: 'Os líderes estão ocupados, ausentes ou esgotados. Aguarde ou conceda folga.' };
+            return { ok: false, erro: funcionarioId ? 'Você está ocupado, ausente ou esgotado.'
+                : 'Os líderes estão ocupados, ausentes ou esgotados. Aguarde ou conceda folga.' };
         }
         const pedido: PedidoAtivo = {
             id: randomUUID(), liderId: lider.id, threadId, projeto, cancelado: false, delegacoes: 0,
-            funcionarios: new Set(), pendentes: new Set(), interrompidos: new Set(), origemCorrecaoId, arquivoId,
+            funcionarios: new Set(), pendentes: new Set(), interrompidos: new Set(), pausados: new Set(),
+            origemCorrecaoId, arquivoId,
         };
         const devolvida = origemCorrecaoId
             ? this.registro.trabalhos().find((item) => item.id === origemCorrecaoId) : undefined;
         this.ativos.set(chave, pedido);
         const instrucoes = arquivoId
-            ? [...instrucoesLiderRefinamento, this.equipeRefinamento(lider.id, pedido.id), `Pedido: ${tarefa}`].join('\n')
+            ? (lider.cargo === 'lider'
+                ? [...instrucoesLiderRefinamento, this.equipeRefinamento(lider.id, pedido.id), `Pedido: ${tarefa}`]
+                : ['Você decidiu refinar o arquivo disponível. Abra a grade e faça envios reais.',
+                    'Trabalhe durante seu período ou até decidir sair_do_work ou fazer_pausa.',
+                    'Seu arquivo permanece disponível até 100%. Só a Diretoria aprova.', tarefa]).join('\n')
             : this.instrucoesProjeto(projetoId, threadId, tarefa, devolvida);
         void this.executar(pedido, lider, tarefa, instrucoes, this.prazos.liderMs).finally(async () => {
             await Promise.allSettled([...pedido.pendentes]);
             if (this.ativos.get(chave) === pedido) this.ativos.delete(chave);
         });
         return { ok: true };
+    }
+
+    /** Libera a participação no Work sem cancelar o arquivo ou interromper os colegas. */
+    pausar(funcionarioId: string, motivo?: string): Resultado {
+        const pedido = [...this.ativos.values()].find((item) => item.funcionarios.has(funcionarioId));
+        if (!pedido?.arquivoId || pedido.cancelado) return { ok: false, erro: 'Nenhum refinamento ativo.' };
+        pedido.pausados.add(funcionarioId);
+        if (motivo) this.registro.gravar(this.registro.trabalhos().map((item) =>
+            item.funcionarioId === funcionarioId && item.pedidoId === pedido.id && item.estado === 'trabalhando'
+                ? { ...item, avaliacao: { ...item.avaliacao!, motivo } } : item));
+        return { ok: true };
+    }
+
+    /** Impede novos envios depois de o agente decidir sair no mesmo turno. */
+    saindo(funcionarioId: string): boolean {
+        return [...this.ativos.values()].some((pedido) => pedido.pausados.has(funcionarioId)
+            && pedido.funcionarios.has(funcionarioId));
     }
 
     private instrucoesProjeto(
@@ -176,29 +215,45 @@ export class Orquestracao {
             : ['Todos já participaram: delegue novamente a um colega disponível ou refine você mesmo.'])].join('\n');
     }
 
-    async delegar(liderId: string, destino: string, tarefa: string): Promise<string> {
-        const pedido = [...this.ativos.values()].find((item) => item.liderId === liderId);
+    async delegar(...argumentos: Parameters<Orquestracao['delegarResultado']>): Promise<string> {
+        return (await this.delegarResultado(...argumentos)).mensagem;
+    }
+
+    /** Entrega resultado estruturado para coordenar etapas reais pelo MCP. */
+    async delegarResultado(liderId: string, destino: string, tarefa: string): Promise<ResultadoAcao> {
+        const pedido = [...this.ativos.values()].find((item) => item.liderId === liderId
+            && item.funcionarios.has(liderId) && !item.pausados.has(liderId));
         const lider = this.registro.funcionarios().find((pessoa) => pessoa.id === liderId);
         if (!pedido || pedido.cancelado || pedido.liderId !== liderId || lider?.cargo !== 'lider') {
-            return 'A delegação só está disponível para o líder de um pedido ativo no Work.';
+            return recusarAcao('A delegação só está disponível para o líder de um pedido ativo no Work.');
         }
         const candidatos = this.registro.funcionarios().filter((pessoa) =>
             pessoa.id === destino || pessoa.nome.toLocaleLowerCase('pt-BR') === destino.toLocaleLowerCase('pt-BR'));
-        if (candidatos.length !== 1) return 'Funcionário não encontrado ou nome ambíguo. Use o ID de ver_escritorio.';
+        if (candidatos.length !== 1) {
+            return recusarAcao('Funcionário não encontrado ou nome ambíguo. Use o ID de ver_escritorio.');
+        }
         const funcionario = candidatos[0]!;
-        if (funcionario.id === liderId) return 'Delegue a um colega, não a você mesmo.';
-        if (!refina(funcionario.cargo)) return `${funcionario.nome} não refina Macrodados. Escolha um refinador.`;
+        if (funcionario.id === liderId) return recusarAcao('Delegue a um colega, não a você mesmo.');
+        if (!refina(funcionario.cargo)) {
+            return recusarAcao(`${funcionario.nome} não refina Macrodados. Escolha um refinador.`);
+        }
         const impedimento = this.registro.impedimento?.(funcionario.id);
-        if (impedimento) return `${funcionario.nome} está indisponível: ${impedimento}. Escolha outro colega.`;
+        if (impedimento) {
+            return recusarAcao(`${funcionario.nome} está indisponível: ${impedimento}. Escolha outro colega.`);
+        }
         if (this.registro.afastado?.(funcionario.id, liderId)) {
-            return 'A Diretoria aprovou a transferência desse funcionário para longe da sua liderança.';
+            return recusarAcao('A Diretoria aprovou a transferência desse funcionário para longe da sua liderança.');
         }
         if (pedido.pendentes.size) {
-            return 'A etapa delegada anterior continua em execução, mesmo que a chamada tenha falhado. '
-                + 'Use cancelar_delegacao para seguir com outro colega.';
+            return recusarAcao('A etapa delegada anterior continua em execução, mesmo que a chamada tenha falhado. '
+                + 'Use cancelar_delegacao para seguir com outro colega.');
         }
-        if (pedido.delegacoes >= 20) return 'Limite de 20 delegações neste pedido. Resuma o progresso à Diretoria.';
-        if (this.ocupado(funcionario.id)) return `${funcionario.nome} está ocupado. Escolha outro colega ou aguarde.`;
+        if (pedido.delegacoes >= 20) {
+            return recusarAcao('Limite de 20 delegações neste pedido. Resuma o progresso à Diretoria.');
+        }
+        if (this.ocupado(funcionario.id)) {
+            return recusarAcao(`${funcionario.nome} está ocupado. Escolha outro colega ou aguarde.`);
+        }
         if (pedido.arquivoId) {
             const participantes = new Set(this.registro.trabalhos()
                 .filter((item) => item.pedidoId === pedido.id).map((item) => item.funcionarioId));
@@ -207,7 +262,7 @@ export class Orquestracao {
                 && !this.ocupado(pessoa.id) && !this.registro.impedimento?.(pessoa.id)
                 && !this.registro.afastado?.(pessoa.id, liderId));
             if (participantes.has(funcionario.id) && disponiveisNovos.length) {
-                return `Distribua a etapa para ${disponiveisNovos[0]!.nome}, que ainda não participou e está disponível.`;
+                return recusarAcao(`Distribua a etapa para ${disponiveisNovos[0]!.nome}, que ainda não participou e está disponível.`);
             }
         }
         pedido.delegacoes++;
@@ -220,17 +275,18 @@ export class Orquestracao {
         pedido.pendentes.add(execucao);
         try {
             const resposta = await execucao;
+            const responder = resposta.ok ? concluirAcao : recusarAcao;
             const trabalho = this.registro.trabalhos().findLast((item) =>
                 item.pedidoId === pedido.id && item.funcionarioId === funcionario.id);
             if (pedido.arquivoId) {
-                return `Etapa de ${funcionario.nome}: ${resposta.ok ? 'encerrada' : 'não concluída'}.\n`
+                return responder(`Etapa de ${funcionario.nome}: ${resposta.ok ? 'encerrada' : 'não concluída'}.\n`
                     + `${resposta.texto}\n${this.equipeRefinamento(liderId, pedido.id)}\n`
                     + 'Passe a próxima etapa a um colega disponível que ainda não participou. '
-                    + 'Se todos já participaram, delegue novamente a quem estiver disponível.';
+                    + 'Se todos já participaram, delegue novamente a quem estiver disponível.');
             }
-            return `Trabalho ${trabalho?.id}. ${funcionario.nome}: `
+            return responder(`Trabalho ${trabalho?.id}. ${funcionario.nome}: `
                 + `${resposta.ok ? 'execução encerrada, ainda exige revisão' : 'não concluiu'}\n${resposta.texto}`
-                + `\nValidação: ${JSON.stringify(trabalho?.avaliacao)}`;
+                + `\nValidação: ${JSON.stringify(trabalho?.avaliacao)}`);
         } finally {
             pedido.pendentes.delete(execucao);
         }
@@ -242,15 +298,20 @@ export class Orquestracao {
     }
 
     /** Interrompe a etapa delegada em andamento para o líder seguir com outro colega ou refinar sozinho. */
-    cancelarDelegacao(liderId: string): string {
+    cancelarDelegacao(...argumentos: Parameters<Orquestracao['cancelarDelegacaoResultado']>): string {
+        return (this.cancelarDelegacaoResultado(...argumentos)).mensagem;
+    }
+
+    /** Entrega resultado estruturado para coordenar etapas reais pelo MCP. */
+    cancelarDelegacaoResultado(liderId: string): ResultadoAcao {
         const pedido = [...this.ativos.values()].find((item) => item.liderId === liderId && !item.cancelado);
-        if (!pedido) return 'A delegação só está disponível para o líder de um pedido ativo no Work.';
+        if (!pedido) return recusarAcao('A delegação só está disponível para o líder de um pedido ativo no Work.');
         const delegados = [...pedido.funcionarios].filter((id) => id !== liderId);
-        if (!delegados.length) return 'Nenhuma etapa delegada em andamento.';
+        if (!delegados.length) return recusarAcao('Nenhuma etapa delegada em andamento.');
         for (const id of delegados) this.interromperDelegado(pedido, id);
         const nomes = this.registro.funcionarios().filter((pessoa) => delegados.includes(pessoa.id))
             .map((pessoa) => pessoa.nome).join(', ');
-        return `Etapa de ${nomes} cancelada. Delegue ao próximo colega disponível ou refine você mesmo.`;
+        return concluirAcao(`Etapa de ${nomes} cancelada. Delegue ao próximo colega disponível ou refine você mesmo.`);
     }
 
     /** Guarda evidências do próprio turno ativo; não concede aprovação nem recompensa. */
@@ -314,6 +375,8 @@ export class Orquestracao {
     }
 
     private pedidoEmAndamento(trabalho: RegistroTrabalho): boolean {
+        if (trabalho.arquivoId && this.registro.trabalhos().some((item) => item.arquivoId === trabalho.arquivoId
+            && item.estado === 'trabalhando')) return true;
         return [...this.ativos.values()].some((pedido) => pedido.id === trabalho.pedidoId);
     }
 
@@ -333,7 +396,8 @@ export class Orquestracao {
     }
 
     private pendencia(trabalho: RegistroTrabalho): string | null {
-        if (trabalho.arquivoId) return null;
+        if (trabalho.arquivoId) return this.registro.refinamentoCompleto?.(trabalho.arquivoId) === false
+            ? 'O arquivo permanece pendente até atingir 100% de refinamento.' : null;
         const registros = this.registro.trabalhos();
         const pedidos = new Set([trabalho.pedidoId]);
         let origem = trabalho.origemCorrecaoId;
@@ -351,30 +415,40 @@ export class Orquestracao {
     }
 
     /** Devolve uma entrega do mesmo projeto e thread ao autor durante um pedido ativo. */
-    async pedirRefazer(liderId: string, trabalhoId: string, motivo: string): Promise<string> {
+    async pedirRefazer(...argumentos: Parameters<Orquestracao['pedirRefazerResultado']>): Promise<string> {
+        return (await this.pedirRefazerResultado(...argumentos)).mensagem;
+    }
+
+    /** Entrega resultado estruturado para coordenar etapas reais pelo MCP. */
+    async pedirRefazerResultado(liderId: string, trabalhoId: string, motivo: string): Promise<ResultadoAcao> {
         const pedido = [...this.ativos.values()].find((item) => item.liderId === liderId && !item.cancelado);
         const trabalho = this.registro.trabalhos().find((item) => item.id === trabalhoId);
         if (!pedido || !trabalho || trabalho.projetoId !== pedido.projeto.id
             || (trabalho.threadId ?? threadPrincipal) !== pedido.threadId || trabalho.funcionarioId === liderId
             || trabalho.estado === 'trabalhando' || trabalho.estado === 'interrompido') {
-            return 'Escolha uma entrega de um colega neste pedido ativo.';
+            return recusarAcao('Escolha uma entrega de um colega neste pedido ativo.');
         }
         if (pedido.pendentes.size || pedido.delegacoes >= 20 || this.ocupado(trabalho.funcionarioId)) {
-            return 'A correção não pode começar agora. Verifique disponibilidade e limite de delegações.';
+            return recusarAcao('A correção não pode começar agora. Verifique disponibilidade e limite de delegações.');
         }
-        if (this.registro.afastado?.(trabalho.funcionarioId, liderId)) return 'Esse colega foi transferido.';
+        if (this.registro.afastado?.(trabalho.funcionarioId, liderId)) {
+            return recusarAcao('Esse colega foi transferido.');
+        }
         const cobranca = this.registro.cobrar?.(liderId, trabalho, motivo);
-        return this.delegar(liderId, trabalho.funcionarioId,
+        return this.delegarResultado(liderId, trabalho.funcionarioId,
             `Correção da entrega ${trabalho.id}. Motivo: ${motivo}\nTarefa original: ${trabalho.tarefa}`
             + `${cobranca ? `\n${cobranca}` : ''}`);
     }
 
-    interromper(threadId?: string, projetoId?: string): void {
+    interromper(threadId?: string, projetoId?: string, preservarArquivo = false): void {
         for (const pedido of this.ativos.values()) {
             if (threadId !== undefined && pedido.threadId !== threadId) continue;
             if (projetoId !== undefined && pedido.projeto.id !== projetoId) continue;
-            pedido.cancelado = true;
-            for (const id of pedido.funcionarios) this.registro.interromper(id);
+            if (!preservarArquivo || !pedido.arquivoId) pedido.cancelado = true;
+            for (const id of pedido.funcionarios) {
+                if (preservarArquivo && pedido.arquivoId) pedido.pausados.add(id);
+                this.registro.interromper(id);
+            }
         }
     }
 
@@ -396,7 +470,8 @@ export class Orquestracao {
     }
 
     private ocupado(id: string): boolean {
-        return [...this.ativos.values()].some((pedido) => pedido.funcionarios.has(id) || pedido.liderId === id)
+        return [...this.ativos.values()].some((pedido) => pedido.funcionarios.has(id)
+            || pedido.liderId === id && !pedido.pausados.has(id))
             || ['trabalhando', 'bloqueado', 'em_pausa'].includes(this.registro.status(id));
     }
 
@@ -405,11 +480,15 @@ export class Orquestracao {
         solicitante?: Funcionario,
     ): Promise<RespostaTrabalho> {
         const id = randomUUID();
+        const duracao = pedido.arquivoId ? this.registro.duracaoRefinamento?.(pedido.arquivoId) : undefined;
+        const periodoMs = duracao === undefined ? prazoMs
+            : solicitante ? Math.min(prazoMs, duracao * 60000) : duracao * 60000;
         pedido.funcionarios.add(funcionario.id);
         const registro: RegistroTrabalho = {
             id, pedidoId: pedido.id, threadId: pedido.threadId, funcionarioId: funcionario.id, nome: funcionario.nome,
             projetoId: pedido.projeto.id, tarefa, resultado: '', estado: 'trabalhando',
             criadoEm: new Date().toISOString(),
+            ...(pedido.arquivoId ? { prazo: new Date(Date.now() + periodoMs).toISOString() } : {}),
             avaliacao: { estado: 'pendente', recompensa: 0 },
             ...(solicitante ? {} : { origemCorrecaoId: pedido.origemCorrecaoId }),
             ...(pedido.arquivoId ? { arquivoId: pedido.arquivoId } : {}),
@@ -423,28 +502,44 @@ export class Orquestracao {
         const chamada = this.registro.executar(
             funcionario, pedido.projeto, prompt, pedido.threadId, (mensagem) => this.registrarEventos(id, mensagem),
         ).catch((erro): RespostaTrabalho => ({ ok: false, texto: erro instanceof Error ? erro.message : String(erro) }));
-        let resposta = await aguardarAte(chamada, prazoMs);
+        let resposta = await aguardarAte(chamada, periodoMs);
         if (!resposta) {
-            this.interromperDelegado(pedido, funcionario.id);
+            if (pedido.arquivoId) pedido.pausados.add(funcionario.id);
+            else pedido.interrompidos.add(funcionario.id);
+            this.registro.interromper(funcionario.id);
             await aguardarAte(chamada, this.prazos.toleranciaMs);
-            resposta = { ok: false, texto: `${funcionario.nome} excedeu o tempo da etapa e foi interrompido.` };
+            resposta = pedido.arquivoId
+                ? { ok: true, texto: 'Período de trabalho encerrado. O arquivo e os envios foram preservados.' }
+                : { ok: false, texto: `${funcionario.nome} excedeu o tempo da etapa e foi interrompido.` };
         }
         pedido.funcionarios.delete(funcionario.id);
         const interrompido = pedido.cancelado || pedido.interrompidos.delete(funcionario.id);
+        const incompleto = !!pedido.arquivoId
+            && this.registro.refinamentoCompleto?.(pedido.arquivoId) === false;
+        const pausado = !interrompido && (pedido.pausados.has(funcionario.id)
+            || resposta.ok && incompleto && !solicitante);
+        if (pausado) pedido.pausados.add(funcionario.id);
+        if (pausado) resposta = { ok: true, texto: 'Período encerrado. O arquivo e os envios foram preservados.' };
+        if (!interrompido && resposta.ok && registro.arquivoId && this.registro.resumirRefinamento) {
+            resposta = { ...resposta, texto: this.registro.resumirRefinamento(registro) };
+        }
         this.registro.gravar(this.registro.trabalhos().map((item) => item.id === id ? {
             ...item, resultado: resposta.texto,
-            estado: interrompido ? 'interrompido' : resposta.ok ? 'concluido' : 'falhou',
+            estado: interrompido ? 'interrompido' : pausado ? 'pausado' : resposta.ok ? 'concluido' : 'falhou',
             falhaTecnica: !interrompido && !resposta.ok,
             avaliacao: { ...item.avaliacao!,
-                estado: !interrompido && resposta.ok && !this.pendencia(item)
+                estado: !interrompido && !pausado && resposta.ok && !this.pendencia(item)
                     ? 'aguardando_aprovacao' : 'pendente',
-                motivo: interrompido ? 'Execução interrompida.' : !resposta.ok ? resposta.texto
+                motivo: pausado ? item.avaliacao?.motivo
+                    ?? 'Período encerrado. O arquivo foi preservado para a próxima retomada.'
+                    : interrompido ? 'Execução interrompida.' : !resposta.ok ? resposta.texto
                     : this.pendencia(item) ?? undefined },
         } : item));
         if (!interrompido && resposta.ok) this.registro.acontecer?.(
             { ...registro, resultado: resposta.texto, estado: resposta.ok ? 'concluido' : 'falhou' },
             resposta.ok ? 'entrega' : 'falha',
         );
+        this.registro.aoLiberar?.(funcionario.id, pedido.arquivoId);
         return resposta;
     }
 

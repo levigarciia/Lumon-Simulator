@@ -120,7 +120,7 @@ async function estabilizar() {
     for (let passo = 0; passo < 10; passo++) await Bun.sleep(5);
 }
 
-test('evento da Diretoria cria arquivo e tarefa reais no Work sem duplicar um pedido ativo', async () => {
+test('evento da Diretoria anuncia arquivo sem iniciar o Work nem duplicar o arquivo disponível', async () => {
     const pasta = await mkdtemp(join(tmpdir(), 'lumon-evento-work-'));
     const { escritorio, lider } = preparar(pasta);
     const liberar = Promise.withResolvers<void>();
@@ -130,16 +130,19 @@ test('evento da Diretoria cria arquivo e tarefa reais no Work sem duplicar um pe
         expect(escritorio['agenda'].verificar()).toBe('entrega_arquivo');
         await estabilizar();
         const estado = escritorio.publico();
-        const trabalho = estado.trabalhos.find((item) => item.funcionarioId === lider.id)!;
-        expect(trabalho.estado).toBe('trabalhando');
-        expect(trabalho.arquivoId).toBeDefined();
-        const arquivo = estado.refinamentos[trabalho.arquivoId!]!;
-        expect(arquivo.duracaoMinutos).toBe(5);
-        expect(trabalho.tarefa).toContain(arquivo.nome);
+        expect(estado.trabalhos).toHaveLength(0);
+        const arquivo = Object.values(estado.refinamentos)[0]!;
+        expect(arquivo.duracaoMinutos).toBe(10);
         expect(estado.social.eventos.some((evento) => evento.autorId === 'diretoria'
             && evento.texto.includes(`entregou o arquivo ${arquivo.nome}`))).toBe(true);
         expect(escritorio['agenda']['registro'].podeReceberArquivo?.()).toBe(false);
         expect(Object.values(estado.refinamentos)).toHaveLength(1);
+        expect(escritorio['contextoGeral'](lider.id)).toContain('ir_para_work');
+        expect(escritorio['irParaWork'](lider.id, 'geral')).toMatchObject({ erro: false, terminal: true });
+        expect(escritorio.publico().trabalhos).toHaveLength(0);
+        escritorio['geral']['registro'].aoEncerrarTurno?.(lider.id, false);
+        await estabilizar();
+        expect(escritorio.publico().trabalhos[0]).toMatchObject({ estado: 'trabalhando', arquivoId: arquivo.id });
     } finally {
         liberar.resolve();
         await estabilizar();
@@ -250,7 +253,8 @@ test('macrodados preserva gabarito interno, delegação e recompensa única apó
             expect(descricao).not.toContain('"grupos"');
             expect(descricao).toContain('Cota do departamento:');
             if (pessoa.id === lider.id) {
-                await escritorio['orquestracao'].delegar(lider.id, colega.id, 'Refine o arquivo');
+                const grupoDelegado = Object.values(escritorio.publico().refinamentos)[0]!.grupos[0]!;
+                await escritorio['orquestracao'].delegar(lider.id, colega.id, grupoDelegado.celulas.join(', '));
                 const arquivo = Object.values(escritorio.publico().refinamentos)[0]!;
                 for (const grupo of arquivo.grupos.filter((item) => !item.refinadoPor)) {
                     expect(escritorio['refinarArquivo'](pessoa.id, grupo.celulas, grupo.temperamento))
@@ -300,11 +304,11 @@ test('envio rejeitado repetido não consome o limite da etapa de Macrodados', ()
         criadoEm: new Date().toISOString(), arquivoId: arquivo.id,
         solicitante: { id: lider.id, nome: lider.nome },
     }];
-    const celulasInvalidas = ['A1', 'B1', 'C1'];
+    const celulasInvalidas = ['A1', 'A2', 'A3'];
     try {
         expect(escritorio['refinarArquivo'](colega.id, celulasInvalidas, 'pavor')).toContain('mesma linha');
-        expect(escritorio['refinarArquivo'](colega.id, ['D10', 'E1', 'E2'], 'alegria')).toContain('mesma linha');
-        expect(escritorio.publico().refinamentos[arquivo.id]!.envios).toHaveLength(0);
+        expect(escritorio['refinarArquivo'](colega.id, ['D10', 'E1', 'E2'], 'alegria')).toContain('células válidas');
+        expect(escritorio.publico().refinamentos[arquivo.id]!.envios).toHaveLength(2);
         expect(escritorio['estadoEtapa'](colega.id)).toEqual({ codigo: 'etapa_ativa', terminal: false });
     } finally { escritorio.encerrar(); }
 });

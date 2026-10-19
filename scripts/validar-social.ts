@@ -7,6 +7,7 @@ import { registrarIpc } from '../electron/ipc';
 import { Escritorio } from '../electron/services/escritorio';
 import { Persistencia } from '../electron/services/persistencia';
 import { estadoInicial } from '../shared/estado';
+import { meritoParaCargo } from '../shared/carreira';
 import { canalEventos } from '../shared/ponte';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -28,6 +29,7 @@ app.whenReady().then(async () => {
     const [helena, pedro, lia] = estado.funcionarios;
     estado.sala.itens.push({ id: 'lanche', tipo: 'maquina_guloseimas', celula: { x: 12, z: 0 }, rotacao: 0 });
     if (!helena || !pedro || !lia) throw new Error('Equipe de validação incompleta.');
+    estado.carreira[pedro.id] = { merito: meritoParaCargo.lider, objetivo: 'lider' };
     const janela = new BrowserWindow({
         show: false, width: 1440, height: 900, backgroundColor: '#101c20',
         webPreferences: {
@@ -43,10 +45,12 @@ app.whenReady().then(async () => {
     const escritorio = new Escritorio(estado, (atual) => persistencia.salvar(atual),
         (evento) => janela.webContents.send(canalEventos, evento), pasta);
     let respostasPrivadas = 0;
+    const respostaPrivadaPermitida = Promise.withResolvers<void>();
     escritorio['geral']['abrirSessao'] = (pessoa, configuracao) => ({
         enviar: async (_prompt, ouvinte) => {
             if (!configuracao.instrucoes.includes('Somente vocês dois recebem')) return;
             respostasPrivadas++;
+            if (respostasPrivadas === 1) await respostaPrivadaPermitida.promise;
             ouvinte.texto(respostasPrivadas > 2 ? '(silêncio)' : pessoa.id === lia.id
                 ? 'Sim, faltou testar a sessão expirada. Vou corrigir essa validação.'
                 : 'Obrigado por reconhecer. Vamos conferir os testes antes da próxima entrega.');
@@ -160,6 +164,7 @@ app.whenReady().then(async () => {
         garantir(JSON.stringify(escritorio['simulacao'].agentes()
             .filter((agente) => [helena.id, lia.id].includes(agente.id)).map((agente) => agente.posicao))
             === JSON.stringify(posicoes), 'Os parceiros saíram entre as respostas.');
+        respostaPrivadaPermitida.resolve();
         await clicar('Geral');
         await esperar();
         garantir(await executar("document.querySelector('aside').textContent.includes('faltou testar a sessão')"),
@@ -259,6 +264,7 @@ app.whenReady().then(async () => {
         }, null, 4));
         console.log('Dinâmica social validada no Electron com estado isolado, IPC, renderização e persistência.');
     } finally {
+        respostaPrivadaPermitida.resolve();
         await cliente.close();
         escritorio.encerrar();
         await persistencia.descarregar();

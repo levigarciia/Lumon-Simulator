@@ -11,7 +11,7 @@ export type Rotacao = 0 | 1 | 2 | 3;
 
 /** `ausente` indica um corpo fora da sala, em folga ou na Sala de Descanso. */
 export type Atividade = 'trabalhando' | 'andando' | 'cafe' | 'comendo' | 'descansando' | 'ouvindo_musica'
-    | 'conversando' | 'ausente';
+    | 'conversando' | 'ausente' | 'observando';
 
 export const tiposItem = [
     'mesa',

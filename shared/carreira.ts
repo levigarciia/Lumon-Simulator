@@ -130,5 +130,6 @@ export function orientacaoCarreira(id: string, equipe: Pessoa[], carreira: Carre
         return `${prefixo} Já pode ser ${alvo}, sem vaga: ocupada por `
             + `${situacao.ocupantes.map((item) => item.nome).join(', ')}. ${orientacao}${defesa}`;
     }
-    return `${prefixo} Você já pode pedir ${alvo}: use propor_mudanca tipo promocao com seu ID.${defesa}`;
+    return `${prefixo} Você já pode solicitar ${alvo} à Diretoria: use propor_mudanca tipo promocao, `
+        + `sem funcionario, com evidencias de acontecimentos conhecidos. O pedido não promove você automaticamente.${defesa}`;
 }
